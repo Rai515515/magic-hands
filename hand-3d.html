@@ -220,6 +220,54 @@
     button.small:disabled { opacity: 0.4; cursor: default; }
     button.small.primary { background: linear-gradient(135deg, #34d399, #10b981); color: #04140d; }
 
+    /* ---- Coverage ring: a clock-face of 12 segments centered on screen. ----
+         It is OUTSIDE #stage so the selfie-mirror never flips it. */
+    #ring {
+      position: fixed;
+      inset: 0;
+      display: none;               /* only shown in Scan mode */
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;        /* never blocks the camera or buttons */
+      z-index: 8;
+    }
+    #ring.show { display: flex; }
+    #ringSvg {
+      width: min(62vw, 46vh);      /* scales to the smaller screen dimension */
+      height: min(62vw, 46vh);
+      filter: drop-shadow(0 2px 10px rgba(0,0,0,0.5));
+    }
+    /* Each segment: faint when empty, green when covered, blue where you aim now. */
+    .seg        { fill: rgba(255,255,255,0.10); stroke: rgba(255,255,255,0.30);
+                  stroke-width: 0.6; transition: fill .25s; }
+    .seg.filled { fill: rgba(52,211,153,0.85); }   /* covered angle (green) */
+    .seg.current{ fill: rgba(108,200,255,0.95); }  /* the way you're facing now */
+    #ringText { fill: #fff; font-size: 20px; font-weight: 700; text-anchor: middle;
+                dominant-baseline: middle; }
+
+    /* ---- Live "sharpness" meter (how steady the camera is right now). ---- */
+    #sharpRow {
+      display: flex; align-items: center; gap: 8px;
+      align-self: center;
+      background: rgba(0,0,0,0.5);
+      backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+      border-radius: 12px; padding: 6px 12px;
+      font-size: clamp(11px, 2.8vw, 14px); font-weight: 600;
+    }
+    #sharpBar { width: clamp(80px, 28vw, 160px); height: 8px; border-radius: 999px;
+                background: rgba(255,255,255,0.2); overflow: hidden; }
+    #sharpFill { height: 100%; width: 0%; background: #f59e0b; transition: width .1s, background .2s; }
+
+    /* The brief "skipped: blurry" pop-up note. */
+    #blurFlash {
+      align-self: center;
+      background: rgba(200, 80, 40, 0.85);
+      border-radius: 12px; padding: 6px 14px;
+      font-size: clamp(11px, 2.8vw, 14px); font-weight: 600;
+      opacity: 0; transition: opacity .15s; pointer-events: none;
+    }
+    #blurFlash.show { opacity: 1; }
+
     /* ---- The big "Start" screen shown before the camera turns on. ----
          (Phones REQUIRE a tap before the camera/audio can start.) */
     #startScreen {
@@ -268,6 +316,15 @@
     <canvas id="three"></canvas>
   </div>
 
+  <!-- Coverage ring (clock face of 12 segments). Built by JS, shown in Scan mode.
+       Lives OUTSIDE #stage so it is never left-right mirrored. -->
+  <div id="ring">
+    <svg id="ringSvg" viewBox="0 0 200 200" aria-hidden="true">
+      <!-- 12 segment <path>s + a center label are added by JavaScript. -->
+      <text id="ringText" x="100" y="100">0/12</text>
+    </svg>
+  </div>
+
   <!-- Help text (left) and FPS counter (right). #help is filled in by JS so it
        shows the right instructions for whichever mode you're in. -->
   <div id="hud">
@@ -279,6 +336,13 @@
        Only visible while you're in Scan mode. -->
   <div id="scanPanel">
     <div id="scanStatus">Pinch to start scanning</div>
+    <!-- Live steadiness meter: green = sharp enough to save, orange = too shaky. -->
+    <div id="sharpRow">
+      <span id="sharpLabel">Steady?</span>
+      <div id="sharpBar"><div id="sharpFill"></div></div>
+    </div>
+    <!-- Briefly appears when a blurry frame is thrown away. -->
+    <div id="blurFlash">⚠ skipped: blurry</div>
     <div id="thumbs"></div>
     <div id="scanBtns">
       <button id="downloadBtn" class="small primary" disabled>⬇ Download photos (ZIP)</button>
@@ -334,6 +398,12 @@
   const thumbsEl    = document.getElementById('thumbs');      // photo thumbnails
   const downloadBtn = document.getElementById('downloadBtn');
   const clearBtn    = document.getElementById('clearBtn');
+  const ringEl      = document.getElementById('ring');        // coverage ring box
+  const ringSvg     = document.getElementById('ringSvg');     // the SVG itself
+  const ringText    = document.getElementById('ringText');    // center "5/12"
+  const sharpFill   = document.getElementById('sharpFill');   // meter fill bar
+  const sharpLabel  = document.getElementById('sharpLabel');  // "Steady ✓"
+  const blurFlash   = document.getElementById('blurFlash');   // "skipped: blurry"
 
   // Is this likely a phone/tablet? If so we default to the REAR camera.
   const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
@@ -371,6 +441,24 @@
   // A hidden canvas we draw the video onto in order to save each photo.
   const snapCanvas = document.createElement('canvas');
   const snapCtx = snapCanvas.getContext('2d');
+
+  // ---- COVERAGE RING state ----
+  const SEGMENTS = 12;                          // 12 "clock" segments = 30° each
+  const coverage = new Array(SEGMENTS).fill(false); // which angles we've captured
+  const segEls = [];                            // the 12 SVG <path> elements
+  let headingAvailable = false;                 // did we get motion-sensor data?
+  let currentSeg = -1;                          // segment we're currently facing
+
+  // ---- BLUR DETECTION state ----
+  // A tiny hidden canvas used only to measure how sharp the live image is.
+  const blurCanvas = document.createElement('canvas');
+  const blurCtx = blurCanvas.getContext('2d', { willReadFrequently: true });
+  let currentSharp = 0;                         // latest sharpness score
+  let recentPeak = 0;                           // best sharpness seen lately
+  let sharpThreshold = 0;                       // "sharp enough" cut-off (adaptive)
+  let lastSharpCheck = 0;                       // throttle timer for the meter
+  const SHARP_FLOOR = 6;                        // absolute minimum sharpness allowed
+  let blurFlashTimer = null;
 
   // The 21 standard hand landmark connections (which dots to join with lines).
   const HAND_CONNECTIONS = [
@@ -549,12 +637,24 @@
       fpsSmooth = fpsSmooth ? fpsSmooth * 0.9 + inst * 0.1 : inst;
     }
 
+    // ---- SCAN mode upkeep: keep the live "steadiness" meter fresh. ----
+    // We only check ~8x a second (throttled) so it stays cheap on phones.
+    if (mode === 'scan' && (now - lastSharpCheck >= 120)) {
+      lastSharpCheck = now;
+      updateSharpness();
+    }
+
     // ---- SCAN mode: snap a photo every CAPTURE_EVERY_MS while capturing. ----
     // This runs on a timer, NOT on your hand — so you can move the phone around
     // the object with your hand out of the picture and it keeps taking photos.
     if (capturing && (now - lastCaptureTime >= CAPTURE_EVERY_MS)) {
-      lastCaptureTime = now;
-      captureFrame();
+      const saved = captureFrame();              // returns false if too blurry
+      if (saved) {
+        lastCaptureTime = now;                   // wait a full interval after a good shot
+      } else {
+        // Blurry: don't reset the full timer — retry soon so we grab a sharp moment.
+        lastCaptureTime = now - (CAPTURE_EVERY_MS - 150);
+      }
     }
 
     // In Scan mode the cube is hidden, so skip the cube logic entirely.
@@ -722,10 +822,10 @@
 
   const SCAN_HELP = `
     <div><b>Scan mode</b> — capture photos of a real object</div>
-    <div>Point at an object on a table</div>
-    <div><b>Pinch</b> once to <b>start</b> capturing</div>
-    <div>Slowly move <b>around</b> the object</div>
-    <div><b>Pinch</b> again to <b>stop</b>, then download</div>`;
+    <div><b>Pinch</b> once to <b>start</b>, again to <b>stop</b></div>
+    <div>Walk <b>around</b> the object to fill the ring</div>
+    <div>Green = covered · blue = where you aim</div>
+    <div>Hold steady — blurry shots are skipped</div>`;
 
   // A short note we drop inside the ZIP so "future you" knows what to do with it.
   const READ_ME_TEXT =
@@ -743,10 +843,18 @@ Tips for a good result: keep the object still, move slowly all the way around
 it, keep it well-lit, and try to get high, low, and side angles.`;
 
   // Draw the current camera frame onto a hidden canvas and save it as a JPEG.
+  // Returns true if a photo was saved, false if it was skipped (too blurry).
   function captureFrame() {
-    if (frames.length >= MAX_FRAMES) { capturing = false; updateScanUI(); return; }
+    if (frames.length >= MAX_FRAMES) { capturing = false; updateScanUI(); return true; }
     const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
-    if (!vw || !vh) return;                       // video not ready yet
+    if (!vw || !vh) return false;                 // video not ready yet
+
+    // BLUR GATE: take a fresh sharpness reading and bail out if it's too shaky.
+    updateSharpness();
+    if (currentSharp < sharpThreshold) {
+      flashBlur();                                // show "skipped: blurry"
+      return false;                               // loop will retry very soon
+    }
 
     // Shrink very large frames so the ZIP doesn't get huge (longest side 1280).
     const maxSide = 1280;
@@ -764,9 +872,149 @@ it, keep it well-lit, and try to get high, low, and side angles.`;
       const url = URL.createObjectURL(blob);      // a temporary link for preview
       frames.push({ blob, url });
       addThumb(url);
+      markCoverage();                             // light up the angle we just shot
       if (frames.length >= MAX_FRAMES) capturing = false;
       updateScanUI();
     }, 'image/jpeg', 0.85);
+    return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  //  BLUR DETECTION: estimate how sharp the live image is.
+  // ---------------------------------------------------------------------------
+  // We shrink the frame, turn it gray, then run a "Laplacian" edge detector.
+  // A sharp photo has lots of crisp edges (high variance); a blurry one is
+  // smooth (low variance). We return that variance number as the score.
+  function measureSharpness() {
+    const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
+    if (!vw || !vh) return 0;
+    const w = 128, h = Math.max(1, Math.round(vh / vw * 128));
+    blurCanvas.width = w; blurCanvas.height = h;
+    blurCtx.drawImage(videoEl, 0, 0, w, h);
+    let data;
+    try { data = blurCtx.getImageData(0, 0, w, h).data; }
+    catch (e) { return 0; }
+
+    const n = w * h;
+    const g = new Float32Array(n);                // grayscale brightness 0..255
+    for (let i = 0, p = 0; p < n; i += 4, p++) {
+      g[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    }
+    // Laplacian at each inner pixel, then its variance (spread).
+    let sum = 0, sum2 = 0, m = 0;
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const idx = y * w + x;
+        const lap = 4 * g[idx] - g[idx - 1] - g[idx + 1] - g[idx - w] - g[idx + w];
+        sum += lap; sum2 += lap * lap; m++;
+      }
+    }
+    if (m === 0) return 0;
+    const mean = sum / m;
+    return sum2 / m - mean * mean;                // variance = sharpness score
+  }
+
+  // Refresh the sharpness score, the adaptive threshold, and the meter bar.
+  function updateSharpness() {
+    currentSharp = measureSharpness();
+    // recentPeak slowly "forgets" old highs so the meter adapts to each scene.
+    recentPeak = Math.max(recentPeak * 0.97, currentSharp);
+    // "sharp enough" = ~45% of the best we've seen, but never below a hard floor.
+    sharpThreshold = Math.max(SHARP_FLOOR, recentPeak * 0.45);
+
+    const pct = Math.max(0, Math.min(100, (currentSharp / (sharpThreshold * 1.6)) * 100));
+    sharpFill.style.width = pct + '%';
+    const ok = currentSharp >= sharpThreshold;
+    sharpFill.style.background = ok ? '#34d399' : '#f59e0b';
+    sharpLabel.textContent = ok ? 'Steady ✓' : 'Hold steadier…';
+  }
+
+  // Briefly show the "skipped: blurry" note.
+  function flashBlur() {
+    blurFlash.classList.add('show');
+    clearTimeout(blurFlashTimer);
+    blurFlashTimer = setTimeout(() => blurFlash.classList.remove('show'), 600);
+  }
+
+  // ---------------------------------------------------------------------------
+  //  COVERAGE RING: build it, update it, and track which way we're facing.
+  // ---------------------------------------------------------------------------
+  // Build the 12 ring segments once (each is a 30° slice of a donut shape).
+  function buildRing() {
+    const cx = 100, cy = 100, ri = 58, ro = 86, gap = 3;   // SVG units & degrees
+    const toXY = (r, deg) => {
+      const a = (deg - 90) * Math.PI / 180;                // -90° so 0° points up
+      return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+    };
+    for (let i = 0; i < SEGMENTS; i++) {
+      const start = i * 30 + gap / 2, end = (i + 1) * 30 - gap / 2;
+      const [x1, y1] = toXY(ro, start), [x2, y2] = toXY(ro, end);
+      const [x3, y3] = toXY(ri, end),   [x4, y4] = toXY(ri, start);
+      const d = `M ${x1} ${y1} A ${ro} ${ro} 0 0 1 ${x2} ${y2} `
+              + `L ${x3} ${y3} A ${ri} ${ri} 0 0 0 ${x4} ${y4} Z`;
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', d);
+      path.setAttribute('class', 'seg');
+      ringSvg.insertBefore(path, ringText);                // keep number on top
+      segEls.push(path);
+    }
+  }
+
+  // Re-colour the segments (covered = green, current heading = blue) + count.
+  function updateRing() {
+    let covered = 0;
+    for (let i = 0; i < SEGMENTS; i++) {
+      let cls = 'seg';
+      if (coverage[i]) { cls += ' filled'; covered++; }
+      if (capturing && headingAvailable && i === currentSeg) cls += ' current';
+      segEls[i].setAttribute('class', cls);
+    }
+    ringText.textContent = covered + '/' + SEGMENTS;
+    return covered;
+  }
+
+  // Mark the angle we're facing as "covered" (called when a photo is saved).
+  function markCoverage() {
+    let seg;
+    if (headingAvailable && currentSeg >= 0) {
+      seg = currentSeg;                          // real direction from the sensor
+    } else {
+      seg = coverage.findIndex(v => !v);         // fallback: fill next empty slot
+      if (seg < 0) seg = 0;
+    }
+    coverage[seg] = true;
+    updateRing();
+  }
+
+  // Wipe the ring back to empty (new scan session).
+  function resetCoverage() {
+    coverage.fill(false);
+    currentSeg = headingAvailable ? currentSeg : -1;
+    updateRing();
+  }
+
+  // Motion sensor: figure out which way the phone is pointing.
+  function onOrientation(e) {
+    // iOS gives a true compass heading; otherwise use the generic "alpha" angle.
+    let a = (typeof e.webkitCompassHeading === 'number') ? e.webkitCompassHeading : e.alpha;
+    if (a == null) return;
+    headingAvailable = true;
+    a = ((a % 360) + 360) % 360;
+    currentSeg = Math.floor(a / (360 / SEGMENTS)) % SEGMENTS;
+  }
+
+  // Ask for motion-sensor access (iOS needs a tap; we're inside the Mode tap).
+  async function enableOrientation() {
+    try {
+      if (typeof DeviceOrientationEvent !== 'undefined'
+          && typeof DeviceOrientationEvent.requestPermission === 'function') {
+        const res = await DeviceOrientationEvent.requestPermission();
+        if (res !== 'granted') { headingAvailable = false; return; }
+      }
+      window.addEventListener('deviceorientation', onOrientation, true);
+    } catch (e) {
+      headingAvailable = false;                  // blocked → fallback ring is used
+    }
   }
 
   // Add one small thumbnail to the strip and keep the newest one in view.
@@ -795,6 +1043,8 @@ it, keep it well-lit, and try to get high, low, and side angles.`;
         ? 'Pinch to start scanning'
         : `${frames.length} photo${frames.length > 1 ? 's' : ''} captured — pinch to add more, or download`;
     }
+    // When every segment is filled, celebrate good all-around coverage.
+    if (coverage.every(Boolean)) scanStatus.textContent += '  ·  Good coverage ✓';
     downloadBtn.disabled = frames.length === 0;
     clearBtn.disabled    = frames.length === 0;
   }
@@ -807,12 +1057,16 @@ it, keep it well-lit, and try to get high, low, and side angles.`;
       modeBtn.textContent = '📷 Mode: Scan';
       modeBtn.classList.add('scanmode');
       scanPanel.classList.add('show');
+      ringEl.classList.add('show');                // show the coverage ring
       cube.visible = false;                        // hide cube; focus on real object
       helpEl.innerHTML = SCAN_HELP;
+      resetCoverage();                             // fresh ring for a new session
+      enableOrientation();                         // ask for the motion sensor
     } else {
       modeBtn.textContent = '🧩 Mode: Place';
       modeBtn.classList.remove('scanmode');
       scanPanel.classList.remove('show');
+      ringEl.classList.remove('show');             // hide the ring
       cube.visible = true;
       helpEl.innerHTML = PLACE_HELP;
     }
@@ -861,9 +1115,12 @@ it, keep it well-lit, and try to get high, low, and side angles.`;
     frames.length = 0;
     thumbsEl.innerHTML = '';
     capturing = false;
+    resetCoverage();                                  // empty the ring too
     updateScanUI();
   });
 
+  // Build the ring segments once, then start in Place mode.
+  buildRing();
   // Start in Place mode (also fills in the help text for the first time).
   setMode('place');
 
