@@ -1,0 +1,44 @@
+# Deploy the repo root to GitHub Pages on every push to main.
+# This workflow also ENABLES Pages automatically (enablement: true),
+# so no manual UI step is needed.
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:          # lets you re-run it manually from the Actions tab
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write             # required by actions/deploy-pages
+
+# Only one deployment runs at a time; new pushes cancel any queued run.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Configure Pages (enables it if not already on)
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true    # turns Pages on automatically
+
+      - name: Upload repo root as Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'           # serve everything in the root (hand-3d.html, README.md)
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
