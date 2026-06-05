@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <!--
   ============================================================================
-  hand-3d.html  —  Gesture-controlled 3D in your browser
+  hand-3d.html  —  Gesture-controlled 3D + 3D Model Library + Camera Scan
   ============================================================================
   WHAT THIS PAGE DOES (in plain English):
     1. Turns on your device camera and shows the live video full-screen.
@@ -14,8 +14,17 @@
        it BIGGER or SMALLER. Let go and it spins by itself again.
     5. Shows on-screen help text and the current FPS (frames per second).
 
+  PLACE MODE NOW HAS A MODEL LIBRARY:
+    A row of buttons lets you switch between several 3D objects. The cube is
+    always there as a fallback test object. The other slots (Heart, Skull, Brain)
+    load real .glb / .gltf files from URLs you paste in at the top of this file.
+    All existing gestures work on any loaded model: pinch-grab, pinch-scale,
+    and auto-spin. You can also drag one finger across the screen (or use a
+    mouse on a laptop) to rotate the model on a fixed axis — helpful for studying
+    anatomy from every angle.
+
   IT HAS TWO MODES (switch with the on-screen "Mode" button):
-    • PLACE mode = everything above (pinch-to-grab the 3D cube).
+    • PLACE mode = model library + pinch-to-grab + rotate gesture.
     • SCAN mode  = point at a real object, pinch ONCE to start capturing photos
       of it as you slowly move around it (one photo every ~0.5s, up to 30), see
       them appear in a thumbnail strip, pinch again to stop, then download them
@@ -46,7 +55,7 @@
   <!-- This meta tag makes the page fill the screen nicely on phones. -->
   <meta name="viewport"
         content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-  <title>Hand-Controlled 3D Cube</title>
+  <title>Hand-Controlled 3D — Model Library</title>
 
   <style>
     /* ---- Basic full-screen, no-scroll layout (phone + laptop friendly) ---- */
@@ -220,6 +229,70 @@
     button.small:disabled { opacity: 0.4; cursor: default; }
     button.small.primary { background: linear-gradient(135deg, #34d399, #10b981); color: #04140d; }
 
+    /* ---- Drag layer: catches mouse/touch drag to rotate the model.
+         Sits below buttons and ring so it doesn't block them. ---- */
+    #dragLayer {
+      position: fixed;
+      inset: 0;
+      z-index: 6;
+      pointer-events: none;        /* enabled only in Place mode */
+      touch-action: none;          /* prevent browser scroll while dragging */
+    }
+    #dragLayer.active { pointer-events: auto; }
+
+    /* ---- Model menu: a scrollable row of model-picker buttons. ----
+         Sits below the HUD, only visible in Place mode. */
+    #modelMenu {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      /* Push it below the HUD: padding-top + the HUD's height (~60px). */
+      padding-top: calc(max(10px, env(safe-area-inset-top)) + 62px);
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding-left: 12px; padding-right: 12px; padding-bottom: 8px;
+      -webkit-overflow-scrolling: touch;
+      pointer-events: none;          /* buttons below handle their own clicks */
+      z-index: 10;
+    }
+    #modelMenu.show { pointer-events: auto; }
+    button.modelBtn {
+      flex: 0 0 auto;
+      border: none;
+      border-radius: 999px;
+      padding: 8px 16px;
+      font-size: clamp(12px, 3vw, 15px);
+      font-weight: 600;
+      color: rgba(255,255,255,0.85);
+      background: rgba(30,30,50,0.70);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      white-space: nowrap;
+      border: 1px solid rgba(255,255,255,0.15);
+    }
+    button.modelBtn.active {
+      background: rgba(60,120,255,0.75);
+      border-color: rgba(108,200,255,0.6);
+      color: #fff;
+    }
+    button.modelBtn:active { transform: scale(0.95); }
+
+    /* ---- Loading overlay: shown while a .glb file is downloading. ---- */
+    #loadOverlay {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0,0,0,0.55);
+      z-index: 20;
+      font-size: clamp(15px, 4vw, 22px);
+      font-weight: 700;
+    }
+    #loadOverlay.show { display: flex; }
+
     /* ---- Coverage ring: a clock-face of 12 segments centered on screen. ----
          It is OUTSIDE #stage so the selfie-mirror never flips it. */
     #ring {
@@ -339,6 +412,19 @@
     <canvas id="three"></canvas>
   </div>
 
+  <!-- Transparent div that captures drag gestures for model rotation. -->
+  <div id="dragLayer"></div>
+
+  <!-- Model menu: built by JavaScript, shown only in Place mode. -->
+  <div id="modelMenu"></div>
+
+  <!-- Loading overlay: shown while a .glb file is downloading / parsing. -->
+  <div id="loadOverlay">⏳ Loading model…</div>
+
+  <!-- Hidden file input — triggered by the "Upload model" button.
+       accept= restricts the OS file picker to 3D model files only. -->
+  <input type="file" id="modelFileInput" accept=".glb,.gltf" style="display:none" />
+
   <!-- Coverage ring (clock face of 12 segments). Built by JS, shown in Scan mode.
        Lives OUTSIDE #stage so it is never left-right mirrored. -->
   <div id="ring">
@@ -402,6 +488,8 @@
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
   <!-- MediaPipe Camera utility: feeds camera frames into the hand tracker. -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
+  <!-- GLTFLoader: part of Three.js, lets us load .glb / .gltf 3D model files. -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
   <!-- JSZip: bundles the captured photos into a single downloadable .zip file. -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
@@ -433,6 +521,10 @@
   const sharpLabel  = document.getElementById('sharpLabel');  // "Steady ✓"
   const blurFlash   = document.getElementById('blurFlash');   // "skipped: blurry"
   const uploadNote  = document.getElementById('uploadNote');  // where-to-upload note
+  const modelMenuEl = document.getElementById('modelMenu');   // model picker row
+  const loadOverlay = document.getElementById('loadOverlay'); // "Loading…" cover
+  const dragLayer   = document.getElementById('dragLayer');   // drag-to-rotate target
+  const fileInput   = document.getElementById('modelFileInput');
 
   // Is this likely a phone/tablet? If so we default to the REAR camera.
   const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
@@ -502,10 +594,10 @@
   ];
 
   // ==========================================================================
-  //  PART 1 — THREE.JS: build the 3D scene with the cube.
+  //  PART 1 — THREE.JS: build the 3D scene.
   // ==========================================================================
   // The renderer draws 3D onto our transparent canvas (alpha:true = see-through
-  // background, so the camera video shows behind the cube).
+  // background, so the camera video shows behind the model).
   const renderer = new THREE.WebGLRenderer({
     canvas: threeCanvas, alpha: true, antialias: true
   });
@@ -513,17 +605,27 @@
 
   const scene = new THREE.Scene();
 
-  // A perspective camera, like a real eye, positioned a bit back from the cube.
+  // A perspective camera, like a real eye, positioned a bit back from the model.
   const cam3d = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
   cam3d.position.set(0, 0, 5);
 
-  // Lights so the cube isn't flat black.
-  scene.add(new THREE.AmbientLight(0xffffff, 0.7));
-  const dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
+  // Lights so models aren't flat black.
+  scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+  const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
   dirLight.position.set(2, 3, 4);
   scene.add(dirLight);
+  // A soft fill light from below so anatomy models show underside detail.
+  const fillLight = new THREE.DirectionalLight(0xffffff, 0.3);
+  fillLight.position.set(-2, -2, 2);
+  scene.add(fillLight);
 
-  // The cube itself: a colorful box with glowing edges.
+  // modelGroup: ONE container that holds whatever model is currently active.
+  // All gestures (grab, scale, spin, rotate) target this group — so they work
+  // identically whether the user loaded a cube, a heart, or their own .glb.
+  const modelGroup = new THREE.Group();
+  scene.add(modelGroup);
+
+  // The built-in cube — always available as a fallback test object.
   const cube = new THREE.Mesh(
     new THREE.BoxGeometry(1, 1, 1),
     new THREE.MeshStandardMaterial({
@@ -531,13 +633,14 @@
       transparent: true, opacity: 0.85
     })
   );
-  scene.add(cube);
-  // White wireframe edges on top of the cube for a nice "hologram" look.
-  const edges = new THREE.LineSegments(
+  // White wireframe edges for a "hologram" look.
+  const cubeEdges = new THREE.LineSegments(
     new THREE.EdgesGeometry(cube.geometry),
     new THREE.LineBasicMaterial({ color: 0xffffff })
   );
-  cube.add(edges);
+  cube.add(cubeEdges);
+  // Cube starts inside modelGroup and is the default visible model.
+  modelGroup.add(cube);
 
   // ==========================================================================
   //  PART 2 — Make everything the right size, and keep it sized on resize.
@@ -655,6 +758,9 @@
   // ==========================================================================
   let lastTime = performance.now();
   let fpsSmooth = 0;
+  // Accumulated manual rotation from drag gestures (radians per axis).
+  // Applied on top of the auto-spin, preserved between grabs.
+  let manualRotX = 0, manualRotY = 0;
 
   function renderLoop() {
     requestAnimationFrame(renderLoop);
@@ -696,35 +802,38 @@
     }
 
     if (hand.present && grabbing) {
-      // ----- GRABBING: move the cube to the hand, and size it by the pinch. -----
-      // Turn the hand's screen position into a 3D point on the plane z=0.
+      // ----- GRABBING: move the model to the hand, size it by the pinch. -----
+      // Turn the hand's 0..1 position into a 3D point on the z=0 plane.
       const [px, py] = coverMap(hand.x, hand.y);
-      const ndcX = (px / window.innerWidth)  * 2 - 1;   // -1..1 left/right
-      const ndcY = -(py / window.innerHeight) * 2 + 1;  // -1..1 bottom/top
+      const ndcX = (px / window.innerWidth)  * 2 - 1;
+      const ndcY = -(py / window.innerHeight) * 2 + 1;
 
       const v = new THREE.Vector3(ndcX, ndcY, 0.5).unproject(cam3d);
       const dir = v.sub(cam3d.position).normalize();
-      const dist = -cam3d.position.z / dir.z;           // reach the z=0 plane
+      const dist = -cam3d.position.z / dir.z;
       const target = cam3d.position.clone().add(dir.multiplyScalar(dist));
 
-      // Smoothly slide toward the target (lerp) so movement looks natural.
-      cube.position.lerp(target, 0.4);
+      modelGroup.position.lerp(target, 0.4);
 
-      // Map the pinch gap (~0.02 tight .. ~0.25 wide) to a cube size (0.4..2.5).
+      // Map pinch gap to scale (0.4 = small, 2.5 = large).
       const s = THREE.MathUtils.clamp(
         THREE.MathUtils.mapLinear(hand.pinch, 0.02, 0.25, 0.4, 2.5),
         0.4, 2.5
       );
-      const cur = cube.scale.x;
-      cube.scale.setScalar(cur + (s - cur) * 0.3);      // smooth resize
+      const cur = modelGroup.scale.x;
+      modelGroup.scale.setScalar(cur + (s - cur) * 0.3);
 
-      // Make the grabbed cube glow a warm color so you know it's held.
-      cube.material.color.setHex(0xffcc33);
+      // Tint only the cube (loaded GLBs have their own materials).
+      if (cube.visible) cube.material.color.setHex(0xffcc33);
     } else {
-      // ----- NOT GRABBING: gently spin on its own. -----
-      cube.rotation.x += 0.005;
-      cube.rotation.y += 0.008;
-      cube.material.color.setHex(0x33aaff);
+      // ----- NOT GRABBING: apply manual drag rotation + gentle auto-spin. -----
+      // manualRotX/Y are updated by the drag listener below; auto-spin adds to them.
+      manualRotY += 0.008;
+      manualRotX += 0.003;
+      modelGroup.rotation.x = manualRotX;
+      modelGroup.rotation.y = manualRotY;
+      // Reset cube tint when released.
+      if (cube.visible) cube.material.color.setHex(0x33aaff);
     }
 
     renderer.render(scene, cam3d);
@@ -845,11 +954,11 @@
   // ==========================================================================
   // The help text shown for each mode (filled into the top-left box).
   const PLACE_HELP = `
-    <div><b>Place mode</b> — play with the 3D cube</div>
-    <div><b>Pinch</b> thumb + index to grab the cube</div>
-    <div>Move your hand to <b>drag</b> it around</div>
-    <div>Open/close the pinch to <b>resize</b> it</div>
-    <div>Let go and it <b>spins</b> on its own</div>`;
+    <div><b>Place mode</b> — 3D model library</div>
+    <div><b>Pinch</b> thumb + index to grab &amp; move</div>
+    <div>Open/close pinch to <b>resize</b></div>
+    <div><b>Drag</b> screen to rotate model</div>
+    <div>Pick a model from the top menu</div>`;
 
   const SCAN_HELP = `
     <div><b>Scan mode</b> — capture photos of a real object</div>
@@ -1114,7 +1223,9 @@ it, keep it well-lit, and try to get high, low, and side angles.`;
       modeBtn.classList.add('scanmode');
       scanPanel.classList.add('show');
       ringEl.classList.add('show');                // show the coverage ring
-      cube.visible = false;                        // hide cube; focus on real object
+      modelGroup.visible = false;                  // hide model; focus on real object
+      modelMenuEl.classList.remove('show');        // hide model menu in scan mode
+      dragLayer.classList.remove('active');
       helpEl.innerHTML = SCAN_HELP;
       resetCoverage();                             // fresh ring for a new session
       enableOrientation();                         // ask for the motion sensor
@@ -1123,7 +1234,9 @@ it, keep it well-lit, and try to get high, low, and side angles.`;
       modeBtn.classList.remove('scanmode');
       scanPanel.classList.remove('show');
       ringEl.classList.remove('show');             // hide the ring
-      cube.visible = true;
+      modelGroup.visible = true;
+      modelMenuEl.classList.add('show');           // show model menu in place mode
+      dragLayer.classList.add('active');
       helpEl.innerHTML = PLACE_HELP;
     }
     updateScanUI();
@@ -1176,8 +1289,267 @@ it, keep it well-lit, and try to get high, low, and side angles.`;
     updateScanUI();
   });
 
+  // ==========================================================================
+  //  PART 9 — MODEL LIBRARY: built-in objects + load your own .glb files.
+  // ==========================================================================
+
+  // ---- MODEL_LIBRARY: the list of available models. ----
+  // Each entry has:
+  //   id    — a short internal name (no spaces)
+  //   label — what the button says
+  //   url   — where to download the .glb file from (or null for built-ins)
+  //
+  // HOW TO ADD YOUR OWN MODEL URL:
+  //   1. Find a free .glb file (Sketchfab, Z-Anatomy — see chat briefing).
+  //   2. Copy its direct download link.
+  //   3. Paste it inside the quotes for 'url' below (replace the empty string).
+  //   IMPORTANT: the URL must allow cross-origin access (CORS). If you get a
+  //   "blocked" error in the browser console, the host won't permit it — use
+  //   the "Upload model" button instead (it loads from your local device, no CORS).
+  // ============================================================
+  const MODEL_LIBRARY = [
+    {
+      id: 'cube',
+      label: '🧊 Cube',
+      url: null,       // built-in — always available, no download needed
+    },
+    {
+      id: 'heart',
+      label: '❤️ Heart',
+      // ============================================================
+      // PASTE YOUR HEART .GLB URL HERE (between the quotes):
+      url: '',
+      // ============================================================
+    },
+    {
+      id: 'skull',
+      label: '💀 Skull',
+      // ============================================================
+      // PASTE YOUR SKULL .GLB URL HERE:
+      url: '',
+      // ============================================================
+    },
+    {
+      id: 'brain',
+      label: '🧠 Brain',
+      // ============================================================
+      // PASTE YOUR BRAIN .GLB URL HERE:
+      url: '',
+      // ============================================================
+    },
+  ];
+
+  // activeModelId tracks which library entry is currently showing.
+  let activeModelId = 'cube';
+  // If the user uploads their own file it gets stored here.
+  let userModel = null;   // { scene: THREE.Object3D, label: 'My model' }
+  // The GLTFLoader — one instance, reused for every load.
+  const gltfLoader = new THREE.GLTFLoader();
+
+  // ---- autoFit: recenter + scale a freshly-loaded model to fit nicely. ----
+  // Without this, a huge city model would be 1000× too big; a tiny molecule
+  // 1000× too small. autoFit always makes the longest dimension ≈ 1.4 units.
+  function autoFit(obj) {
+    const box = new THREE.Box3().setFromObject(obj);
+    const center = box.getCenter(new THREE.Vector3());
+    const size   = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z) || 1;
+    const scale  = 1.4 / maxDim;                  // target size: 1.4 units
+    obj.scale.setScalar(scale);
+    // Recompute center after scaling, then translate so centroid = origin.
+    const box2 = new THREE.Box3().setFromObject(obj);
+    const center2 = box2.getCenter(new THREE.Vector3());
+    obj.position.sub(center2);
+  }
+
+  // ---- showBuiltinCube: put only the cube into the modelGroup. ----
+  function showBuiltinCube() {
+    // Remove anything that isn't the cube.
+    const toRemove = [];
+    modelGroup.children.forEach(c => { if (c !== cube) toRemove.push(c); });
+    toRemove.forEach(c => modelGroup.remove(c));
+    cube.visible = true;
+    // Reset cube scale so it looks the same every time it comes back.
+    cube.position.set(0, 0, 0);
+    cube.scale.setScalar(1);
+    modelGroup.position.set(0, 0, 0);
+    modelGroup.scale.setScalar(1);
+  }
+
+  // ---- showObject: put a loaded THREE.Object3D into the modelGroup. ----
+  function showObject(obj) {
+    showBuiltinCube();                 // clear the group first
+    cube.visible = false;              // hide the cube
+    autoFit(obj);                      // size + center it
+    modelGroup.add(obj);
+    modelGroup.position.set(0, 0, 0);
+    modelGroup.scale.setScalar(1);
+  }
+
+  // ---- loadModelById: load a library entry by its id string. ----
+  async function loadModelById(id) {
+    const entry = MODEL_LIBRARY.find(m => m.id === id);
+    if (!entry) return;
+    activeModelId = id;
+    renderMenuButtons();               // update button highlight immediately
+
+    if (id === 'cube') {
+      showBuiltinCube();
+      return;
+    }
+    if (!entry.url) {
+      // No URL set yet — tell the user where to paste one.
+      showBuiltinCube();
+      showLoadError(
+        `No URL set for "${entry.label}". Open hand-3d.html in a text editor, ` +
+        `find the "${entry.id}" entry in MODEL_LIBRARY, and paste a .glb link ` +
+        `into the url: '' field. Or use "📁 Upload model" to load from your device.`
+      );
+      return;
+    }
+    await loadFromUrl(entry.url, entry.label);
+  }
+
+  // ---- loadFromUrl: download + parse a .glb/.gltf from a URL. ----
+  async function loadFromUrl(url, label) {
+    loadOverlay.textContent = `⏳ Loading ${label}…`;
+    loadOverlay.classList.add('show');
+    return new Promise((resolve) => {
+      gltfLoader.load(
+        url,
+        (gltf) => {                    // success
+          loadOverlay.classList.remove('show');
+          showObject(gltf.scene);
+          resolve(true);
+        },
+        null,                          // progress (not used)
+        (err) => {                     // error
+          loadOverlay.classList.remove('show');
+          showBuiltinCube();
+          activeModelId = 'cube';
+          renderMenuButtons();
+          showLoadError(
+            `Could not load "${label}". Most likely the server blocks ` +
+            `cross-origin requests (CORS). Try the "📁 Upload model" button ` +
+            `to load a .glb directly from your device instead.`
+          );
+          resolve(false);
+        }
+      );
+    });
+  }
+
+  // ---- loadFromFile: load a .glb/.gltf the user picked from their device. ----
+  // This uses a local object URL — no server, no CORS, works completely offline.
+  function loadFromFile(file) {
+    if (!file) return;
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (ext !== 'glb' && ext !== 'gltf') {
+      showLoadError(`"${file.name}" is not a .glb or .gltf file. Please pick a 3D model file.`);
+      return;
+    }
+    const objectURL = URL.createObjectURL(file);   // a temporary local URL
+    loadOverlay.textContent = `⏳ Loading ${file.name}…`;
+    loadOverlay.classList.add('show');
+    gltfLoader.load(
+      objectURL,
+      (gltf) => {
+        URL.revokeObjectURL(objectURL);             // free the temporary URL
+        loadOverlay.classList.remove('show');
+        // Store it so the user can switch back to it after picking a built-in.
+        userModel = { obj: gltf.scene, label: file.name.replace(/\.[^.]+$/, '') };
+        activeModelId = 'user';
+        showObject(gltf.scene);
+        renderMenuButtons();                        // adds / updates "My model" button
+      },
+      null,
+      (err) => {
+        URL.revokeObjectURL(objectURL);
+        loadOverlay.classList.remove('show');
+        showLoadError(`Could not parse "${file.name}". Make sure it's a valid .glb or .gltf file.`);
+      }
+    );
+  }
+
+  // Show a brief error message inside the loadOverlay, then auto-dismiss.
+  function showLoadError(msg) {
+    loadOverlay.textContent = '⚠ ' + msg;
+    loadOverlay.classList.add('show');
+    setTimeout(() => loadOverlay.classList.remove('show'), 5000);
+  }
+
+  // ---- renderMenuButtons: build (or rebuild) the model menu row. ----
+  function renderMenuButtons() {
+    modelMenuEl.innerHTML = '';         // clear all existing buttons
+
+    // One button per library entry.
+    MODEL_LIBRARY.forEach(entry => {
+      const btn = document.createElement('button');
+      btn.className = 'modelBtn' + (activeModelId === entry.id ? ' active' : '');
+      btn.textContent = entry.label;
+      // Grey out entries that have no URL and aren't the cube.
+      if (entry.id !== 'cube' && !entry.url) btn.style.opacity = '0.5';
+      btn.addEventListener('click', () => loadModelById(entry.id));
+      modelMenuEl.appendChild(btn);
+    });
+
+    // If the user has uploaded a model, show it as "My model" in the row.
+    if (userModel) {
+      const btn = document.createElement('button');
+      btn.className = 'modelBtn' + (activeModelId === 'user' ? ' active' : '');
+      btn.textContent = '📱 ' + userModel.label;
+      btn.addEventListener('click', () => {
+        activeModelId = 'user';
+        showObject(userModel.obj);
+        renderMenuButtons();
+      });
+      modelMenuEl.appendChild(btn);
+    }
+
+    // Always add the "Upload model" button at the end.
+    const uploadBtn = document.createElement('button');
+    uploadBtn.className = 'modelBtn';
+    uploadBtn.textContent = '📁 Upload model';
+    uploadBtn.addEventListener('click', () => fileInput.click());
+    modelMenuEl.appendChild(uploadBtn);
+  }
+
+  // When the user picks a file from the OS file picker, load it.
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files && fileInput.files[0]) {
+      loadFromFile(fileInput.files[0]);
+      fileInput.value = '';            // reset so the same file can be re-picked
+    }
+  });
+
+  // ---- Drag-to-rotate: one pointer drag on the screen → rotate the model. ----
+  // This works with a mouse on laptop and a finger touch on phone.
+  let dragActive = false, dragX = 0, dragY = 0;
+
+  dragLayer.addEventListener('pointerdown', (e) => {
+    dragActive = true;
+    dragX = e.clientX;
+    dragY = e.clientY;
+    dragLayer.setPointerCapture(e.pointerId);   // keep events even if pointer leaves
+  });
+
+  dragLayer.addEventListener('pointermove', (e) => {
+    if (!dragActive) return;
+    const dx = e.clientX - dragX;
+    const dy = e.clientY - dragY;
+    dragX = e.clientX; dragY = e.clientY;
+    // Convert pixel delta to radians (sensitivity: π per ~600px of travel).
+    manualRotY += dx * (Math.PI / 600);
+    manualRotX += dy * (Math.PI / 600);
+  });
+
+  dragLayer.addEventListener('pointerup',    () => { dragActive = false; });
+  dragLayer.addEventListener('pointercancel',() => { dragActive = false; });
+
   // Build the ring segments once, then start in Place mode.
   buildRing();
+  // Build the initial model menu (cube + greyed-out slots + upload).
+  renderMenuButtons();
   // Start in Place mode (also fills in the help text for the first time).
   setMode('place');
 
