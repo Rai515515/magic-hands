@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<!--
+  ============================================================================
+  hand-3d.html  —  Gesture-controlled 3D in your browser
+  ============================================================================
+  WHAT THIS PAGE DOES (in plain English):
+    1. Turns on your device camera and shows the live video full-screen.
+    2. Watches ONE of your hands using Google's "MediaPipe Hands" and draws
+       little dots + lines (the "skeleton") on top of your hand.
+    3. Floats a spinning 3D cube (drawn with "Three.js") over the video, so it
+       looks like the cube is in your room.
+    4. PINCH your thumb + index finger together to GRAB the cube. While you
+       pinch you can MOVE it around, and the gap between your two fingers makes
+       it BIGGER or SMALLER. Let go and it spins by itself again.
+    5. Shows on-screen help text and the current FPS (frames per second).
+
+  IT WORKS ON BOTH A LAPTOP AND A PHONE and adapts automatically:
+    - On a phone it starts with the REAR camera; on a laptop it uses the webcam.
+    - A "Flip Camera" button switches between front/rear (or your cameras).
+
+  IMPORTANT: cameras only work over https:// or http://localhost — NOT when you
+  double-click the file (file://). You must "serve" it. The exact, beginner-
+  friendly commands are printed for you in the chat after this file is built.
+
+  No installing, no build step — every library is loaded from a CDN (the web).
+  ============================================================================
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <!-- This meta tag makes the page fill the screen nicely on phones. -->
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Hand-Controlled 3D Cube</title>
+
+  <style>
+    /* ---- Basic full-screen, no-scroll layout (phone + laptop friendly) ---- */
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;            /* no scrollbars */
+      background: #000;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #fff;
+      /* Use the FULL screen height even on phones (handles the URL bar). */
+      height: 100dvh;
+    }
+
+    /* "stage" holds the camera video + the two transparent canvases stacked. */
+    #stage {
+      position: fixed;
+      inset: 0;                    /* top:0 right:0 bottom:0 left:0 */
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    /* The live camera image. object-fit: cover = fill the screen, no stretching. */
+    #video {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      background: #000;
+    }
+
+    /* Both canvases sit exactly on top of the video, full-screen. */
+    #landmarks, #three {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;        /* clicks pass through to buttons below */
+    }
+
+    /* ---- On-screen heads-up display (help text + FPS) ---- */
+    #hud {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      padding: 10px 14px;
+      /* respect phone notches / safe areas */
+      padding-top: max(10px, env(safe-area-inset-top));
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 10px;
+      pointer-events: none;        /* don't block the camera/cube */
+      z-index: 10;
+    }
+    #help {
+      background: rgba(0,0,0,0.45);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      border-radius: 12px;
+      padding: 10px 12px;
+      max-width: 70vw;
+      font-size: clamp(11px, 2.6vw, 15px);
+      line-height: 1.4;
+    }
+    #help b { color: #6cf; }
+    #fps {
+      background: rgba(0,0,0,0.45);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      border-radius: 12px;
+      padding: 10px 12px;
+      font-variant-numeric: tabular-nums;
+      font-size: clamp(11px, 2.6vw, 15px);
+      white-space: nowrap;
+    }
+    #fps b { color: #6f6; }
+
+    /* ---- Bottom buttons ---- */
+    #controls {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      padding: 12px;
+      padding-bottom: max(12px, env(safe-area-inset-bottom));
+      display: flex;
+      justify-content: center;
+      gap: 12px;
+      z-index: 10;
+    }
+    button.action {
+      pointer-events: auto;
+      border: none;
+      border-radius: 999px;
+      padding: 14px 22px;
+      font-size: clamp(14px, 3.6vw, 18px);
+      font-weight: 600;
+      color: #fff;
+      background: rgba(30,30,40,0.7);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      box-shadow: 0 4px 18px rgba(0,0,0,0.45);
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    button.action:active { transform: scale(0.96); }
+
+    /* ---- The big "Start" screen shown before the camera turns on. ----
+         (Phones REQUIRE a tap before the camera/audio can start.) */
+    #startScreen {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 18px;
+      text-align: center;
+      padding: 24px;
+      background: radial-gradient(circle at 50% 35%, #1b2240, #05060c);
+    }
+    #startScreen h1 { font-size: clamp(22px, 6vw, 40px); }
+    #startScreen p  { max-width: 520px; opacity: 0.85; font-size: clamp(13px, 3.4vw, 17px); line-height: 1.5; }
+    #startBtn {
+      pointer-events: auto;
+      border: none;
+      border-radius: 999px;
+      padding: 18px 34px;
+      font-size: clamp(16px, 4.4vw, 22px);
+      font-weight: 700;
+      color: #04111a;
+      background: linear-gradient(135deg, #7df9ff, #6cf);
+      box-shadow: 0 8px 30px rgba(108,200,255,0.5);
+      cursor: pointer;
+    }
+    #startBtn:active { transform: scale(0.97); }
+
+    /* Small status / error line on the start screen. */
+    #status { min-height: 1.2em; font-size: clamp(12px, 3vw, 15px); opacity: 0.9; }
+    .err { color: #ff8080 !important; opacity: 1 !important; }
+  </style>
+</head>
+
+<body>
+  <!-- =================== The visible app =================== -->
+  <div id="stage">
+    <!-- Live camera feed. muted + playsinline are REQUIRED for phones. -->
+    <video id="video" playsinline muted autoplay></video>
+    <!-- 2D canvas: draws the hand skeleton (dots + lines). -->
+    <canvas id="landmarks"></canvas>
+    <!-- 3D canvas: Three.js draws the cube here (transparent background). -->
+    <canvas id="three"></canvas>
+  </div>
+
+  <!-- Help text (left) and FPS counter (right) -->
+  <div id="hud">
+    <div id="help">
+      <div><b>Pinch</b> thumb + index to grab the cube</div>
+      <div>Move your hand to <b>drag</b> it around</div>
+      <div>Open/close the pinch to <b>resize</b> it</div>
+      <div>Let go and it <b>spins</b> on its own</div>
+    </div>
+    <div id="fps">FPS: <b id="fpsVal">--</b></div>
+  </div>
+
+  <!-- Buttons -->
+  <div id="controls">
+    <button id="flipBtn" class="action">🔄 Flip Camera</button>
+  </div>
+
+  <!-- The tap-to-start cover screen -->
+  <div id="startScreen">
+    <h1>✋ Hand-Controlled 3D Cube</h1>
+    <p>
+      This uses your camera to track your hand and float a 3D cube in your room.
+      Tap the button below and <b>allow camera access</b> when your browser asks.
+    </p>
+    <button id="startBtn">▶ Start Camera</button>
+    <div id="status"></div>
+  </div>
+
+  <!-- =================== Libraries from the CDN (the internet) =================== -->
+  <!-- Three.js: the 3D engine that draws the cube. -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+  <!-- MediaPipe Hands: Google's hand-tracking model. -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+  <!-- MediaPipe Camera utility: feeds camera frames into the hand tracker. -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
+
+  <script>
+  // ==========================================================================
+  //  PART 0 — Grab the page elements we'll use, and set up some variables.
+  // ==========================================================================
+  const videoEl     = document.getElementById('video');
+  const stageEl     = document.getElementById('stage');
+  const lmCanvas    = document.getElementById('landmarks'); // hand skeleton
+  const lmCtx       = lmCanvas.getContext('2d');
+  const threeCanvas = document.getElementById('three');     // 3D cube
+  const fpsValEl    = document.getElementById('fpsVal');
+  const flipBtn     = document.getElementById('flipBtn');
+  const startBtn    = document.getElementById('startBtn');
+  const startScreen = document.getElementById('startScreen');
+  const statusEl    = document.getElementById('status');
+
+  // Is this likely a phone/tablet? If so we default to the REAR camera.
+  const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+                   || (navigator.maxTouchPoints > 1 && window.matchMedia('(max-width: 900px)').matches);
+
+  // Which camera we're using: 'environment' = rear, 'user' = front/webcam.
+  let facingMode = isMobile ? 'environment' : 'user';
+  // We mirror the picture for a selfie-style (front) camera so it feels natural.
+  let mirrored = (facingMode === 'user');
+
+  // Holds the live camera stream + MediaPipe objects (created on Start).
+  let mediaStream = null;
+  let camera = null;
+  let hands = null;
+
+  // The latest hand info from MediaPipe, read by the 3D loop each frame.
+  // present: is a hand visible?  x/y: hand position (0..1).  pinch: finger gap.
+  const hand = { present: false, x: 0.5, y: 0.5, pinch: 0.2 };
+
+  // "grabbing" uses hysteresis: it turns ON at a tight pinch and only turns OFF
+  // when you open your fingers wider — so the grab doesn't flicker.
+  let grabbing = false;
+  const PINCH_ON  = 0.06;  // pinch tighter than this = start grabbing
+  const PINCH_OFF = 0.13;  // open wider than this    = let go
+
+  // The 21 standard hand landmark connections (which dots to join with lines).
+  const HAND_CONNECTIONS = [
+    [0,1],[1,2],[2,3],[3,4],          // thumb
+    [0,5],[5,6],[6,7],[7,8],          // index finger
+    [5,9],[9,10],[10,11],[11,12],     // middle finger
+    [9,13],[13,14],[14,15],[15,16],   // ring finger
+    [13,17],[17,18],[18,19],[19,20],  // pinky
+    [0,17]                            // base of palm
+  ];
+
+  // ==========================================================================
+  //  PART 1 — THREE.JS: build the 3D scene with the cube.
+  // ==========================================================================
+  // The renderer draws 3D onto our transparent canvas (alpha:true = see-through
+  // background, so the camera video shows behind the cube).
+  const renderer = new THREE.WebGLRenderer({
+    canvas: threeCanvas, alpha: true, antialias: true
+  });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+
+  const scene = new THREE.Scene();
+
+  // A perspective camera, like a real eye, positioned a bit back from the cube.
+  const cam3d = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
+  cam3d.position.set(0, 0, 5);
+
+  // Lights so the cube isn't flat black.
+  scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
+  dirLight.position.set(2, 3, 4);
+  scene.add(dirLight);
+
+  // The cube itself: a colorful box with glowing edges.
+  const cube = new THREE.Mesh(
+    new THREE.BoxGeometry(1, 1, 1),
+    new THREE.MeshStandardMaterial({
+      color: 0x33aaff, metalness: 0.3, roughness: 0.35,
+      transparent: true, opacity: 0.85
+    })
+  );
+  scene.add(cube);
+  // White wireframe edges on top of the cube for a nice "hologram" look.
+  const edges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(cube.geometry),
+    new THREE.LineBasicMaterial({ color: 0xffffff })
+  );
+  cube.add(edges);
+
+  // ==========================================================================
+  //  PART 2 — Make everything the right size, and keep it sized on resize.
+  // ==========================================================================
+  function resizeAll() {
+    const w = window.innerWidth, h = window.innerHeight;
+
+    // Three.js renderer + camera aspect ratio.
+    renderer.setSize(w, h, false);
+    cam3d.aspect = w / h;
+    cam3d.updateProjectionMatrix();
+
+    // The 2D landmark canvas, scaled for sharp lines on high-DPI screens.
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    lmCanvas.width  = Math.round(w * dpr);
+    lmCanvas.height = Math.round(h * dpr);
+    lmCtx.setTransform(dpr, 0, 0, dpr, 0, 0); // draw in CSS pixels
+
+    applyMirror();
+  }
+  window.addEventListener('resize', resizeAll);
+  window.addEventListener('orientationchange', () => setTimeout(resizeAll, 200));
+
+  // When using the front camera we flip the whole stage left-right (selfie view).
+  // Flipping with CSS keeps ALL the math simple — we never mirror by hand.
+  function applyMirror() {
+    stageEl.style.transform = mirrored ? 'scaleX(-1)' : 'none';
+  }
+
+  // ==========================================================================
+  //  PART 3 — Map the hand's position to where it appears on screen.
+  // ==========================================================================
+  // MediaPipe gives hand points as 0..1 of the CAMERA image. But the video is
+  // shown with "object-fit: cover", which crops it to fill the screen. This
+  // helper converts a 0..1 image point into the matching on-screen pixel,
+  // accounting for that crop — so the cube/skeleton line up with your hand.
+  function coverMap(nx, ny) {
+    const vw = videoEl.videoWidth  || 1280;
+    const vh = videoEl.videoHeight || 720;
+    const cw = window.innerWidth, ch = window.innerHeight;
+    const scale = Math.max(cw / vw, ch / vh); // "cover" picks the bigger scale
+    const dispW = vw * scale, dispH = vh * scale;
+    const offX = (cw - dispW) / 2, offY = (ch - dispH) / 2;
+    return [ nx * dispW + offX, ny * dispH + offY ];
+  }
+
+  // ==========================================================================
+  //  PART 4 — MediaPipe Hands: handle each tracking result.
+  // ==========================================================================
+  function onHandResults(results) {
+    // Clear last frame's skeleton.
+    lmCtx.clearRect(0, 0, lmCanvas.width, lmCanvas.height);
+
+    const list = results.multiHandLandmarks;
+    if (!list || list.length === 0) {
+      hand.present = false;
+      grabbing = false;            // no hand = nothing grabbed
+      return;
+    }
+
+    // We only track one hand (the first one MediaPipe reports).
+    const lm = list[0];
+
+    // ---- Draw the skeleton: lines between connected dots, then the dots. ----
+    lmCtx.lineWidth = 3;
+    lmCtx.strokeStyle = 'rgba(120, 230, 255, 0.9)';
+    for (const [a, b] of HAND_CONNECTIONS) {
+      const [ax, ay] = coverMap(lm[a].x, lm[a].y);
+      const [bx, by] = coverMap(lm[b].x, lm[b].y);
+      lmCtx.beginPath();
+      lmCtx.moveTo(ax, ay);
+      lmCtx.lineTo(bx, by);
+      lmCtx.stroke();
+    }
+    lmCtx.fillStyle = '#ffffff';
+    for (const p of lm) {
+      const [px, py] = coverMap(p.x, p.y);
+      lmCtx.beginPath();
+      lmCtx.arc(px, py, 4, 0, Math.PI * 2);
+      lmCtx.fill();
+    }
+
+    // ---- Measure the pinch: distance between thumb tip (4) and index tip (8).
+    // We measure in real screen pixels, then divide by the screen's short side
+    // so the number means the same thing on any screen size.
+    const thumb = lm[4], index = lm[8];
+    const [tx, ty] = coverMap(thumb.x, thumb.y);
+    const [ix, iy] = coverMap(index.x, index.y);
+    const distPx = Math.hypot(tx - ix, ty - iy);
+    const pinch = distPx / Math.min(window.innerWidth, window.innerHeight);
+
+    // The point between the two finger tips = where we "hold" the cube.
+    const midX = (thumb.x + index.x) / 2;
+    const midY = (thumb.y + index.y) / 2;
+
+    hand.present = true;
+    hand.x = midX;
+    hand.y = midY;
+    hand.pinch = pinch;
+
+    // Hysteresis: start grabbing on a tight pinch, release only when opened wide.
+    if (!grabbing && pinch < PINCH_ON)  grabbing = true;
+    if ( grabbing && pinch > PINCH_OFF) grabbing = false;
+  }
+
+  // ==========================================================================
+  //  PART 5 — The 3D render loop (runs ~60 times a second).
+  // ==========================================================================
+  let lastTime = performance.now();
+  let fpsSmooth = 0;
+
+  function renderLoop() {
+    requestAnimationFrame(renderLoop);
+
+    // ---- FPS calculation (smoothed so the number doesn't jump around) ----
+    const now = performance.now();
+    const dt = now - lastTime;
+    lastTime = now;
+    if (dt > 0) {
+      const inst = 1000 / dt;
+      fpsSmooth = fpsSmooth ? fpsSmooth * 0.9 + inst * 0.1 : inst;
+    }
+
+    if (hand.present && grabbing) {
+      // ----- GRABBING: move the cube to the hand, and size it by the pinch. -----
+      // Turn the hand's screen position into a 3D point on the plane z=0.
+      const [px, py] = coverMap(hand.x, hand.y);
+      const ndcX = (px / window.innerWidth)  * 2 - 1;   // -1..1 left/right
+      const ndcY = -(py / window.innerHeight) * 2 + 1;  // -1..1 bottom/top
+
+      const v = new THREE.Vector3(ndcX, ndcY, 0.5).unproject(cam3d);
+      const dir = v.sub(cam3d.position).normalize();
+      const dist = -cam3d.position.z / dir.z;           // reach the z=0 plane
+      const target = cam3d.position.clone().add(dir.multiplyScalar(dist));
+
+      // Smoothly slide toward the target (lerp) so movement looks natural.
+      cube.position.lerp(target, 0.4);
+
+      // Map the pinch gap (~0.02 tight .. ~0.25 wide) to a cube size (0.4..2.5).
+      const s = THREE.MathUtils.clamp(
+        THREE.MathUtils.mapLinear(hand.pinch, 0.02, 0.25, 0.4, 2.5),
+        0.4, 2.5
+      );
+      const cur = cube.scale.x;
+      cube.scale.setScalar(cur + (s - cur) * 0.3);      // smooth resize
+
+      // Make the grabbed cube glow a warm color so you know it's held.
+      cube.material.color.setHex(0xffcc33);
+    } else {
+      // ----- NOT GRABBING: gently spin on its own. -----
+      cube.rotation.x += 0.005;
+      cube.rotation.y += 0.008;
+      cube.material.color.setHex(0x33aaff);
+    }
+
+    renderer.render(scene, cam3d);
+    fpsValEl.textContent = Math.round(fpsSmooth);
+  }
+
+  // ==========================================================================
+  //  PART 6 — Turn the camera ON and start tracking.
+  // ==========================================================================
+  async function startCamera() {
+    // Ask the browser for the chosen camera. facingMode is a "preference".
+    const constraints = {
+      audio: false,
+      video: {
+        facingMode: { ideal: facingMode },
+        width:  { ideal: 1280 },
+        height: { ideal: 720 }
+      }
+    };
+    mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+    videoEl.srcObject = mediaStream;
+    await videoEl.play();
+
+    // Size everything once the video knows its real dimensions.
+    resizeAll();
+    if (videoEl.readyState < 2) {
+      await new Promise(res => videoEl.addEventListener('loadeddata', res, { once: true }));
+    }
+    resizeAll();
+  }
+
+  // Build the MediaPipe Hands tracker once.
+  function buildHands() {
+    hands = new Hands({
+      // Tells MediaPipe where to download its model files from.
+      locateFile: (file) =>
+        `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`
+    });
+    hands.setOptions({
+      maxNumHands: 1,             // track a single hand
+      modelComplexity: 1,         // 1 = good accuracy
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.6
+    });
+    hands.onResults(onHandResults);
+  }
+
+  // The MediaPipe "Camera" helper grabs each video frame and feeds it to Hands.
+  function startTrackingLoop() {
+    camera = new Camera(videoEl, {
+      onFrame: async () => { await hands.send({ image: videoEl }); },
+      width: 1280,
+      height: 720
+    });
+    camera.start();
+  }
+
+  // Stop everything cleanly (used before flipping cameras).
+  function stopCamera() {
+    try { if (camera && camera.stop) camera.stop(); } catch (e) {}
+    camera = null;
+    if (mediaStream) {
+      mediaStream.getTracks().forEach(t => t.stop()); // release the camera
+      mediaStream = null;
+    }
+  }
+
+  // ==========================================================================
+  //  PART 7 — Button handlers + first start.
+  // ==========================================================================
+  // The big "Start Camera" button. Phones require this tap before the camera
+  // (and before MediaPipe can run) — so all setup happens here.
+  startBtn.addEventListener('click', async () => {
+    startBtn.disabled = true;
+    statusEl.classList.remove('err');
+    statusEl.textContent = 'Starting camera…';
+    try {
+      buildHands();
+      await startCamera();
+      startTrackingLoop();
+      renderLoop();                 // begin drawing the 3D cube
+      startScreen.style.display = 'none';  // hide the cover screen
+    } catch (err) {
+      // Most common cause: camera permission denied, or not on https/localhost.
+      console.error(err);
+      statusEl.classList.add('err');
+      statusEl.textContent =
+        '⚠ Could not start the camera: ' + (err && err.message ? err.message : err) +
+        '  — Make sure you allowed camera access and opened the page via ' +
+        'http://localhost or https (not as a file).';
+      startBtn.disabled = false;
+    }
+  });
+
+  // The "Flip Camera" button: switch front <-> rear and restart tracking.
+  flipBtn.addEventListener('click', async () => {
+    if (!mediaStream) return;       // not started yet
+    flipBtn.disabled = true;
+    stopCamera();
+    facingMode = (facingMode === 'user') ? 'environment' : 'user';
+    mirrored = (facingMode === 'user');
+    try {
+      await startCamera();
+      startTrackingLoop();
+    } catch (err) {
+      console.error(err);
+      // If the chosen camera isn't available, flip back.
+      facingMode = (facingMode === 'user') ? 'environment' : 'user';
+      mirrored = (facingMode === 'user');
+      await startCamera();
+      startTrackingLoop();
+    }
+    flipBtn.disabled = false;
+  });
+
+  // Make sure sizes are correct even before the camera starts.
+  resizeAll();
+  </script>
+</body>
+</html>
