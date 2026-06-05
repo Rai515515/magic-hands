@@ -268,6 +268,29 @@
     }
     #blurFlash.show { opacity: 1; }
 
+    /* The "where to upload" note shown after a scan auto-completes. */
+    #uploadNote {
+      display: none;               /* shown only after auto-stop */
+      align-self: center;
+      max-width: 90vw;
+      text-align: center;
+      background: rgba(16, 90, 60, 0.85);
+      border: 1px solid rgba(52,211,153,0.6);
+      border-radius: 12px;
+      padding: 8px 14px;
+      font-size: clamp(11px, 2.8vw, 14px);
+      line-height: 1.4;
+    }
+    #uploadNote.show { display: block; }
+    #uploadNote b { color: #7df9ff; }
+
+    /* Gentle pulse to draw your eye to the Download button after a scan. */
+    @keyframes pulseGlow {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(52,211,153,0.6); }
+      50%      { box-shadow: 0 0 0 10px rgba(52,211,153,0); }
+    }
+    button.small.pulse { animation: pulseGlow 1.4s ease-out infinite; }
+
     /* ---- The big "Start" screen shown before the camera turns on. ----
          (Phones REQUIRE a tap before the camera/audio can start.) */
     #startScreen {
@@ -343,6 +366,11 @@
     </div>
     <!-- Briefly appears when a blurry frame is thrown away. -->
     <div id="blurFlash">⚠ skipped: blurry</div>
+    <!-- Appears after auto-stop: tells you where to upload the ZIP. -->
+    <div id="uploadNote">
+      Next: open <b>lumalabs.ai</b> (Luma AI) or <b>poly.cam</b> (Polycam),
+      then <b>drag your downloaded ZIP in</b> to build the 3D model.
+    </div>
     <div id="thumbs"></div>
     <div id="scanBtns">
       <button id="downloadBtn" class="small primary" disabled>⬇ Download photos (ZIP)</button>
@@ -404,6 +432,7 @@
   const sharpFill   = document.getElementById('sharpFill');   // meter fill bar
   const sharpLabel  = document.getElementById('sharpLabel');  // "Steady ✓"
   const blurFlash   = document.getElementById('blurFlash');   // "skipped: blurry"
+  const uploadNote  = document.getElementById('uploadNote');  // where-to-upload note
 
   // Is this likely a phone/tablet? If so we default to the REAR camera.
   const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
@@ -437,6 +466,8 @@
   let lastCaptureTime = 0;          // when we last took a photo (for the timer)
   const CAPTURE_EVERY_MS = 500;     // take one photo every 0.5 seconds
   const MAX_FRAMES = 30;            // stop automatically after 30 photos
+  const MIN_SHARP_FRAMES = 20;      // need at least this many sharp shots to "complete"
+  let scanComplete = false;         // true once auto-stop has fired
   const frames = [];                // the captured photos, as { blob, url }
   // A hidden canvas we draw the video onto in order to save each photo.
   const snapCanvas = document.createElement('canvas');
@@ -874,9 +905,20 @@ it, keep it well-lit, and try to get high, low, and side angles.`;
       addThumb(url);
       markCoverage();                             // light up the angle we just shot
       if (frames.length >= MAX_FRAMES) capturing = false;
+      maybeAutoComplete();                         // finish on full, sharp coverage
       updateScanUI();
     }, 'image/jpeg', 0.85);
     return true;
+  }
+
+  // Auto-stop: once the whole ring is green AND we have enough sharp photos,
+  // finish the scan by ourselves. (Manual pinch-to-stop still works any time.)
+  function maybeAutoComplete() {
+    if (!capturing) return;
+    if (coverage.every(Boolean) && frames.length >= MIN_SHARP_FRAMES) {
+      capturing = false;
+      scanComplete = true;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1028,23 +1070,36 @@ it, keep it well-lit, and try to get high, low, and side angles.`;
   // Start or stop capturing (called by a "pinch tap" while in Scan mode).
   function toggleCapture() {
     capturing = !capturing;
-    if (capturing) lastCaptureTime = 0;           // take the first photo at once
+    if (capturing) {
+      lastCaptureTime = 0;                         // take the first photo at once
+      scanComplete = false;                        // starting fresh
+    }
     updateScanUI();
   }
 
   // Update the scan status line + enable/disable the Download & Clear buttons.
   function updateScanUI() {
-    if (capturing) {
+    if (scanComplete) {
+      // Auto-stop happened: announce success and point to the upload step.
+      scanStatus.textContent = `Scan complete ✓ — ${frames.length} sharp photos captured`;
+      scanStatus.classList.remove('recording');
+      uploadNote.classList.add('show');
+      downloadBtn.classList.add('pulse');          // draw the eye to Download
+    } else if (capturing) {
       scanStatus.textContent = `● Capturing… ${frames.length}/${MAX_FRAMES} — pinch again to stop`;
       scanStatus.classList.add('recording');
+      uploadNote.classList.remove('show');
+      downloadBtn.classList.remove('pulse');
     } else {
       scanStatus.classList.remove('recording');
       scanStatus.textContent = frames.length === 0
         ? 'Pinch to start scanning'
         : `${frames.length} photo${frames.length > 1 ? 's' : ''} captured — pinch to add more, or download`;
+      // When every segment is filled, note the good all-around coverage.
+      if (coverage.every(Boolean)) scanStatus.textContent += '  ·  Good coverage ✓';
+      uploadNote.classList.remove('show');
+      downloadBtn.classList.remove('pulse');
     }
-    // When every segment is filled, celebrate good all-around coverage.
-    if (coverage.every(Boolean)) scanStatus.textContent += '  ·  Good coverage ✓';
     downloadBtn.disabled = frames.length === 0;
     clearBtn.disabled    = frames.length === 0;
   }
@@ -1053,6 +1108,7 @@ it, keep it well-lit, and try to get high, low, and side angles.`;
   function setMode(m) {
     mode = m;
     capturing = false;
+    scanComplete = false;
     if (mode === 'scan') {
       modeBtn.textContent = '📷 Mode: Scan';
       modeBtn.classList.add('scanmode');
@@ -1115,6 +1171,7 @@ it, keep it well-lit, and try to get high, low, and side angles.`;
     frames.length = 0;
     thumbsEl.innerHTML = '';
     capturing = false;
+    scanComplete = false;
     resetCoverage();                                  // empty the ring too
     updateScanUI();
   });
