@@ -1,0 +1,1188 @@
+<!DOCTYPE html>
+<!--
+  ============================================================================
+  hand-3d.html  —  Gesture-controlled 3D in your browser
+  ============================================================================
+  WHAT THIS PAGE DOES (in plain English):
+    1. Turns on your device camera and shows the live video full-screen.
+    2. Watches ONE of your hands using Google's "MediaPipe Hands" and draws
+       little dots + lines (the "skeleton") on top of your hand.
+    3. Floats a spinning 3D cube (drawn with "Three.js") over the video, so it
+       looks like the cube is in your room.
+    4. PINCH your thumb + index finger together to GRAB the cube. While you
+       pinch you can MOVE it around, and the gap between your two fingers makes
+       it BIGGER or SMALLER. Let go and it spins by itself again.
+    5. Shows on-screen help text and the current FPS (frames per second).
+
+  IT HAS TWO MODES (switch with the on-screen "Mode" button):
+    • PLACE mode = everything above (pinch-to-grab the 3D cube).
+    • SCAN mode  = point at a real object, pinch ONCE to start capturing photos
+      of it as you slowly move around it (one photo every ~0.5s, up to 30), see
+      them appear in a thumbnail strip, pinch again to stop, then download them
+      all as a ZIP file.
+
+  HONEST NOTE ABOUT "SCANNING":
+    A plain web browser CANNOT build a real photoreal 3D model live (true
+    photogrammetry / Gaussian-splatting / NeRF needs heavy GPU number-crunching
+    that doesn't run in a normal browser tab). So this does the genuinely useful
+    realistic thing: it captures a clean set of photos for you and packages them
+    into a ZIP. You then feed that ZIP into a real reconstruction tool (Luma AI,
+    Polycam, or Nerfstudio) to get an actual 3D model. See the chat briefing.
+
+  IT WORKS ON BOTH A LAPTOP AND A PHONE and adapts automatically:
+    - On a phone it starts with the REAR camera; on a laptop it uses the webcam.
+    - A "Flip Camera" button switches between front/rear (or your cameras).
+
+  IMPORTANT: cameras only work over https:// or http://localhost — NOT when you
+  double-click the file (file://). You must "serve" it. The exact, beginner-
+  friendly commands are printed for you in the chat after this file is built.
+
+  No installing, no build step — every library is loaded from a CDN (the web).
+  ============================================================================
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <!-- This meta tag makes the page fill the screen nicely on phones. -->
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Hand-Controlled 3D Cube</title>
+
+  <style>
+    /* ---- Basic full-screen, no-scroll layout (phone + laptop friendly) ---- */
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;            /* no scrollbars */
+      background: #000;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #fff;
+      /* Use the FULL screen height even on phones (handles the URL bar). */
+      height: 100dvh;
+    }
+
+    /* "stage" holds the camera video + the two transparent canvases stacked. */
+    #stage {
+      position: fixed;
+      inset: 0;                    /* top:0 right:0 bottom:0 left:0 */
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    /* The live camera image. object-fit: cover = fill the screen, no stretching. */
+    #video {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      background: #000;
+    }
+
+    /* Both canvases sit exactly on top of the video, full-screen. */
+    #landmarks, #three {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;        /* clicks pass through to buttons below */
+    }
+
+    /* ---- On-screen heads-up display (help text + FPS) ---- */
+    #hud {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      padding: 10px 14px;
+      /* respect phone notches / safe areas */
+      padding-top: max(10px, env(safe-area-inset-top));
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 10px;
+      pointer-events: none;        /* don't block the camera/cube */
+      z-index: 10;
+    }
+    #help {
+      background: rgba(0,0,0,0.45);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      border-radius: 12px;
+      padding: 10px 12px;
+      max-width: 70vw;
+      font-size: clamp(11px, 2.6vw, 15px);
+      line-height: 1.4;
+    }
+    #help b { color: #6cf; }
+    #fps {
+      background: rgba(0,0,0,0.45);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      border-radius: 12px;
+      padding: 10px 12px;
+      font-variant-numeric: tabular-nums;
+      font-size: clamp(11px, 2.6vw, 15px);
+      white-space: nowrap;
+    }
+    #fps b { color: #6f6; }
+
+    /* ---- Bottom buttons ---- */
+    #controls {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      padding: 12px;
+      padding-bottom: max(12px, env(safe-area-inset-bottom));
+      display: flex;
+      justify-content: center;
+      gap: 12px;
+      z-index: 10;
+    }
+    button.action {
+      pointer-events: auto;
+      border: none;
+      border-radius: 999px;
+      padding: 14px 22px;
+      font-size: clamp(14px, 3.6vw, 18px);
+      font-weight: 600;
+      color: #fff;
+      background: rgba(30,30,40,0.7);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      box-shadow: 0 4px 18px rgba(0,0,0,0.45);
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    button.action:active { transform: scale(0.96); }
+    /* The Mode button glows a different color so the current mode is obvious. */
+    button.action.scanmode { background: rgba(120, 40, 120, 0.75); }
+
+    /* ---- Scan panel: the thumbnail strip + scan buttons (only shown in Scan mode) ---- */
+    #scanPanel {
+      position: fixed;
+      left: 0; right: 0;
+      /* Sits just above the bottom button row. */
+      bottom: calc(72px + env(safe-area-inset-bottom));
+      display: none;               /* hidden until you enter Scan mode */
+      flex-direction: column;
+      gap: 8px;
+      padding: 10px 12px;
+      z-index: 9;
+    }
+    #scanPanel.show { display: flex; }
+
+    /* The line that says "Pinch to start" / "Capturing 12/30" etc. */
+    #scanStatus {
+      align-self: center;
+      background: rgba(0,0,0,0.55);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      border-radius: 12px;
+      padding: 8px 14px;
+      font-size: clamp(12px, 3vw, 16px);
+      font-weight: 600;
+    }
+    #scanStatus.recording { background: rgba(200, 40, 40, 0.75); }
+
+    /* The horizontal strip of captured photo thumbnails. */
+    #thumbs {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;            /* scroll sideways if there are many */
+      padding: 6px;
+      background: rgba(0,0,0,0.4);
+      border-radius: 12px;
+      min-height: 0;
+      -webkit-overflow-scrolling: touch;
+    }
+    #thumbs:empty { display: none; }
+    #thumbs img {
+      height: clamp(44px, 12vw, 70px);
+      border-radius: 6px;
+      border: 1px solid rgba(255,255,255,0.25);
+      flex: 0 0 auto;
+    }
+
+    /* The two scan buttons (Download / Clear). Smaller than the main buttons. */
+    #scanBtns { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+    button.small {
+      pointer-events: auto;
+      border: none;
+      border-radius: 999px;
+      padding: 10px 18px;
+      font-size: clamp(12px, 3vw, 15px);
+      font-weight: 600;
+      color: #fff;
+      background: rgba(30,30,40,0.8);
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    button.small:disabled { opacity: 0.4; cursor: default; }
+    button.small.primary { background: linear-gradient(135deg, #34d399, #10b981); color: #04140d; }
+
+    /* ---- Coverage ring: a clock-face of 12 segments centered on screen. ----
+         It is OUTSIDE #stage so the selfie-mirror never flips it. */
+    #ring {
+      position: fixed;
+      inset: 0;
+      display: none;               /* only shown in Scan mode */
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;        /* never blocks the camera or buttons */
+      z-index: 8;
+    }
+    #ring.show { display: flex; }
+    #ringSvg {
+      width: min(62vw, 46vh);      /* scales to the smaller screen dimension */
+      height: min(62vw, 46vh);
+      filter: drop-shadow(0 2px 10px rgba(0,0,0,0.5));
+    }
+    /* Each segment: faint when empty, green when covered, blue where you aim now. */
+    .seg        { fill: rgba(255,255,255,0.10); stroke: rgba(255,255,255,0.30);
+                  stroke-width: 0.6; transition: fill .25s; }
+    .seg.filled { fill: rgba(52,211,153,0.85); }   /* covered angle (green) */
+    .seg.current{ fill: rgba(108,200,255,0.95); }  /* the way you're facing now */
+    #ringText { fill: #fff; font-size: 20px; font-weight: 700; text-anchor: middle;
+                dominant-baseline: middle; }
+
+    /* ---- Live "sharpness" meter (how steady the camera is right now). ---- */
+    #sharpRow {
+      display: flex; align-items: center; gap: 8px;
+      align-self: center;
+      background: rgba(0,0,0,0.5);
+      backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+      border-radius: 12px; padding: 6px 12px;
+      font-size: clamp(11px, 2.8vw, 14px); font-weight: 600;
+    }
+    #sharpBar { width: clamp(80px, 28vw, 160px); height: 8px; border-radius: 999px;
+                background: rgba(255,255,255,0.2); overflow: hidden; }
+    #sharpFill { height: 100%; width: 0%; background: #f59e0b; transition: width .1s, background .2s; }
+
+    /* The brief "skipped: blurry" pop-up note. */
+    #blurFlash {
+      align-self: center;
+      background: rgba(200, 80, 40, 0.85);
+      border-radius: 12px; padding: 6px 14px;
+      font-size: clamp(11px, 2.8vw, 14px); font-weight: 600;
+      opacity: 0; transition: opacity .15s; pointer-events: none;
+    }
+    #blurFlash.show { opacity: 1; }
+
+    /* The "where to upload" note shown after a scan auto-completes. */
+    #uploadNote {
+      display: none;               /* shown only after auto-stop */
+      align-self: center;
+      max-width: 90vw;
+      text-align: center;
+      background: rgba(16, 90, 60, 0.85);
+      border: 1px solid rgba(52,211,153,0.6);
+      border-radius: 12px;
+      padding: 8px 14px;
+      font-size: clamp(11px, 2.8vw, 14px);
+      line-height: 1.4;
+    }
+    #uploadNote.show { display: block; }
+    #uploadNote b { color: #7df9ff; }
+
+    /* Gentle pulse to draw your eye to the Download button after a scan. */
+    @keyframes pulseGlow {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(52,211,153,0.6); }
+      50%      { box-shadow: 0 0 0 10px rgba(52,211,153,0); }
+    }
+    button.small.pulse { animation: pulseGlow 1.4s ease-out infinite; }
+
+    /* ---- The big "Start" screen shown before the camera turns on. ----
+         (Phones REQUIRE a tap before the camera/audio can start.) */
+    #startScreen {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 18px;
+      text-align: center;
+      padding: 24px;
+      background: radial-gradient(circle at 50% 35%, #1b2240, #05060c);
+    }
+    #startScreen h1 { font-size: clamp(22px, 6vw, 40px); }
+    #startScreen p  { max-width: 520px; opacity: 0.85; font-size: clamp(13px, 3.4vw, 17px); line-height: 1.5; }
+    #startBtn {
+      pointer-events: auto;
+      border: none;
+      border-radius: 999px;
+      padding: 18px 34px;
+      font-size: clamp(16px, 4.4vw, 22px);
+      font-weight: 700;
+      color: #04111a;
+      background: linear-gradient(135deg, #7df9ff, #6cf);
+      box-shadow: 0 8px 30px rgba(108,200,255,0.5);
+      cursor: pointer;
+    }
+    #startBtn:active { transform: scale(0.97); }
+
+    /* Small status / error line on the start screen. */
+    #status { min-height: 1.2em; font-size: clamp(12px, 3vw, 15px); opacity: 0.9; }
+    .err { color: #ff8080 !important; opacity: 1 !important; }
+  </style>
+</head>
+
+<body>
+  <!-- =================== The visible app =================== -->
+  <div id="stage">
+    <!-- Live camera feed. muted + playsinline are REQUIRED for phones. -->
+    <video id="video" playsinline muted autoplay></video>
+    <!-- 2D canvas: draws the hand skeleton (dots + lines). -->
+    <canvas id="landmarks"></canvas>
+    <!-- 3D canvas: Three.js draws the cube here (transparent background). -->
+    <canvas id="three"></canvas>
+  </div>
+
+  <!-- Coverage ring (clock face of 12 segments). Built by JS, shown in Scan mode.
+       Lives OUTSIDE #stage so it is never left-right mirrored. -->
+  <div id="ring">
+    <svg id="ringSvg" viewBox="0 0 200 200" aria-hidden="true">
+      <!-- 12 segment <path>s + a center label are added by JavaScript. -->
+      <text id="ringText" x="100" y="100">0/12</text>
+    </svg>
+  </div>
+
+  <!-- Help text (left) and FPS counter (right). #help is filled in by JS so it
+       shows the right instructions for whichever mode you're in. -->
+  <div id="hud">
+    <div id="help"></div>
+    <div id="fps">FPS: <b id="fpsVal">--</b></div>
+  </div>
+
+  <!-- Scan panel: status line + captured-photo thumbnails + download/clear.
+       Only visible while you're in Scan mode. -->
+  <div id="scanPanel">
+    <div id="scanStatus">Pinch to start scanning</div>
+    <!-- Live steadiness meter: green = sharp enough to save, orange = too shaky. -->
+    <div id="sharpRow">
+      <span id="sharpLabel">Steady?</span>
+      <div id="sharpBar"><div id="sharpFill"></div></div>
+    </div>
+    <!-- Briefly appears when a blurry frame is thrown away. -->
+    <div id="blurFlash">⚠ skipped: blurry</div>
+    <!-- Appears after auto-stop: tells you where to upload the ZIP. -->
+    <div id="uploadNote">
+      Next: open <b>lumalabs.ai</b> (Luma AI) or <b>poly.cam</b> (Polycam),
+      then <b>drag your downloaded ZIP in</b> to build the 3D model.
+    </div>
+    <div id="thumbs"></div>
+    <div id="scanBtns">
+      <button id="downloadBtn" class="small primary" disabled>⬇ Download photos (ZIP)</button>
+      <button id="clearBtn" class="small" disabled>🗑 Clear</button>
+    </div>
+  </div>
+
+  <!-- Bottom buttons -->
+  <div id="controls">
+    <button id="modeBtn" class="action">🧩 Mode: Place</button>
+    <button id="flipBtn" class="action">🔄 Flip Camera</button>
+  </div>
+
+  <!-- The tap-to-start cover screen -->
+  <div id="startScreen">
+    <h1>✋ Hand-Controlled 3D Cube</h1>
+    <p>
+      This uses your camera to track your hand and float a 3D cube in your room.
+      Tap the button below and <b>allow camera access</b> when your browser asks.
+    </p>
+    <button id="startBtn">▶ Start Camera</button>
+    <div id="status"></div>
+  </div>
+
+  <!-- =================== Libraries from the CDN (the internet) =================== -->
+  <!-- Three.js: the 3D engine that draws the cube. -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+  <!-- MediaPipe Hands: Google's hand-tracking model. -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+  <!-- MediaPipe Camera utility: feeds camera frames into the hand tracker. -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
+  <!-- JSZip: bundles the captured photos into a single downloadable .zip file. -->
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+
+  <script>
+  // ==========================================================================
+  //  PART 0 — Grab the page elements we'll use, and set up some variables.
+  // ==========================================================================
+  const videoEl     = document.getElementById('video');
+  const stageEl     = document.getElementById('stage');
+  const lmCanvas    = document.getElementById('landmarks'); // hand skeleton
+  const lmCtx       = lmCanvas.getContext('2d');
+  const threeCanvas = document.getElementById('three');     // 3D cube
+  const fpsValEl    = document.getElementById('fpsVal');
+  const flipBtn     = document.getElementById('flipBtn');
+  const startBtn    = document.getElementById('startBtn');
+  const startScreen = document.getElementById('startScreen');
+  const statusEl    = document.getElementById('status');
+  const helpEl      = document.getElementById('help');       // mode instructions
+  const modeBtn     = document.getElementById('modeBtn');     // Place <-> Scan
+  const scanPanel   = document.getElementById('scanPanel');   // strip + buttons
+  const scanStatus  = document.getElementById('scanStatus');  // "Capturing 5/30"
+  const thumbsEl    = document.getElementById('thumbs');      // photo thumbnails
+  const downloadBtn = document.getElementById('downloadBtn');
+  const clearBtn    = document.getElementById('clearBtn');
+  const ringEl      = document.getElementById('ring');        // coverage ring box
+  const ringSvg     = document.getElementById('ringSvg');     // the SVG itself
+  const ringText    = document.getElementById('ringText');    // center "5/12"
+  const sharpFill   = document.getElementById('sharpFill');   // meter fill bar
+  const sharpLabel  = document.getElementById('sharpLabel');  // "Steady ✓"
+  const blurFlash   = document.getElementById('blurFlash');   // "skipped: blurry"
+  const uploadNote  = document.getElementById('uploadNote');  // where-to-upload note
+
+  // Is this likely a phone/tablet? If so we default to the REAR camera.
+  const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+                   || (navigator.maxTouchPoints > 1 && window.matchMedia('(max-width: 900px)').matches);
+
+  // Which camera we're using: 'environment' = rear, 'user' = front/webcam.
+  let facingMode = isMobile ? 'environment' : 'user';
+  // We mirror the picture for a selfie-style (front) camera so it feels natural.
+  let mirrored = (facingMode === 'user');
+
+  // Holds the live camera stream + MediaPipe objects (created on Start).
+  let mediaStream = null;
+  let camera = null;
+  let hands = null;
+
+  // The latest hand info from MediaPipe, read by the 3D loop each frame.
+  // present: is a hand visible?  x/y: hand position (0..1).  pinch: finger gap.
+  const hand = { present: false, x: 0.5, y: 0.5, pinch: 0.2 };
+
+  // "grabbing" uses hysteresis: it turns ON at a tight pinch and only turns OFF
+  // when you open your fingers wider — so the grab doesn't flicker.
+  let grabbing = false;
+  let prevGrabbing = false;   // last frame's value, so we can spot a NEW pinch
+  const PINCH_ON  = 0.06;  // pinch tighter than this = start grabbing
+  const PINCH_OFF = 0.13;  // open wider than this    = let go
+
+  // ---- MODE + SCAN state ----
+  // mode is either 'place' (grab the cube) or 'scan' (capture photos).
+  let mode = 'place';
+  let capturing = false;            // are we actively snapping photos right now?
+  let lastCaptureTime = 0;          // when we last took a photo (for the timer)
+  const CAPTURE_EVERY_MS = 500;     // take one photo every 0.5 seconds
+  const MAX_FRAMES = 30;            // stop automatically after 30 photos
+  const MIN_SHARP_FRAMES = 20;      // need at least this many sharp shots to "complete"
+  let scanComplete = false;         // true once auto-stop has fired
+  const frames = [];                // the captured photos, as { blob, url }
+  // A hidden canvas we draw the video onto in order to save each photo.
+  const snapCanvas = document.createElement('canvas');
+  const snapCtx = snapCanvas.getContext('2d');
+
+  // ---- COVERAGE RING state ----
+  const SEGMENTS = 12;                          // 12 "clock" segments = 30° each
+  const coverage = new Array(SEGMENTS).fill(false); // which angles we've captured
+  const segEls = [];                            // the 12 SVG <path> elements
+  let headingAvailable = false;                 // did we get motion-sensor data?
+  let currentSeg = -1;                          // segment we're currently facing
+
+  // ---- BLUR DETECTION state ----
+  // A tiny hidden canvas used only to measure how sharp the live image is.
+  const blurCanvas = document.createElement('canvas');
+  const blurCtx = blurCanvas.getContext('2d', { willReadFrequently: true });
+  let currentSharp = 0;                         // latest sharpness score
+  let recentPeak = 0;                           // best sharpness seen lately
+  let sharpThreshold = 0;                       // "sharp enough" cut-off (adaptive)
+  let lastSharpCheck = 0;                       // throttle timer for the meter
+  const SHARP_FLOOR = 6;                        // absolute minimum sharpness allowed
+  let blurFlashTimer = null;
+
+  // The 21 standard hand landmark connections (which dots to join with lines).
+  const HAND_CONNECTIONS = [
+    [0,1],[1,2],[2,3],[3,4],          // thumb
+    [0,5],[5,6],[6,7],[7,8],          // index finger
+    [5,9],[9,10],[10,11],[11,12],     // middle finger
+    [9,13],[13,14],[14,15],[15,16],   // ring finger
+    [13,17],[17,18],[18,19],[19,20],  // pinky
+    [0,17]                            // base of palm
+  ];
+
+  // ==========================================================================
+  //  PART 1 — THREE.JS: build the 3D scene with the cube.
+  // ==========================================================================
+  // The renderer draws 3D onto our transparent canvas (alpha:true = see-through
+  // background, so the camera video shows behind the cube).
+  const renderer = new THREE.WebGLRenderer({
+    canvas: threeCanvas, alpha: true, antialias: true
+  });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+
+  const scene = new THREE.Scene();
+
+  // A perspective camera, like a real eye, positioned a bit back from the cube.
+  const cam3d = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
+  cam3d.position.set(0, 0, 5);
+
+  // Lights so the cube isn't flat black.
+  scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
+  dirLight.position.set(2, 3, 4);
+  scene.add(dirLight);
+
+  // The cube itself: a colorful box with glowing edges.
+  const cube = new THREE.Mesh(
+    new THREE.BoxGeometry(1, 1, 1),
+    new THREE.MeshStandardMaterial({
+      color: 0x33aaff, metalness: 0.3, roughness: 0.35,
+      transparent: true, opacity: 0.85
+    })
+  );
+  scene.add(cube);
+  // White wireframe edges on top of the cube for a nice "hologram" look.
+  const edges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(cube.geometry),
+    new THREE.LineBasicMaterial({ color: 0xffffff })
+  );
+  cube.add(edges);
+
+  // ==========================================================================
+  //  PART 2 — Make everything the right size, and keep it sized on resize.
+  // ==========================================================================
+  function resizeAll() {
+    const w = window.innerWidth, h = window.innerHeight;
+
+    // Three.js renderer + camera aspect ratio.
+    renderer.setSize(w, h, false);
+    cam3d.aspect = w / h;
+    cam3d.updateProjectionMatrix();
+
+    // The 2D landmark canvas, scaled for sharp lines on high-DPI screens.
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    lmCanvas.width  = Math.round(w * dpr);
+    lmCanvas.height = Math.round(h * dpr);
+    lmCtx.setTransform(dpr, 0, 0, dpr, 0, 0); // draw in CSS pixels
+
+    applyMirror();
+  }
+  window.addEventListener('resize', resizeAll);
+  window.addEventListener('orientationchange', () => setTimeout(resizeAll, 200));
+
+  // When using the front camera we flip the whole stage left-right (selfie view).
+  // Flipping with CSS keeps ALL the math simple — we never mirror by hand.
+  function applyMirror() {
+    stageEl.style.transform = mirrored ? 'scaleX(-1)' : 'none';
+  }
+
+  // ==========================================================================
+  //  PART 3 — Map the hand's position to where it appears on screen.
+  // ==========================================================================
+  // MediaPipe gives hand points as 0..1 of the CAMERA image. But the video is
+  // shown with "object-fit: cover", which crops it to fill the screen. This
+  // helper converts a 0..1 image point into the matching on-screen pixel,
+  // accounting for that crop — so the cube/skeleton line up with your hand.
+  function coverMap(nx, ny) {
+    const vw = videoEl.videoWidth  || 1280;
+    const vh = videoEl.videoHeight || 720;
+    const cw = window.innerWidth, ch = window.innerHeight;
+    const scale = Math.max(cw / vw, ch / vh); // "cover" picks the bigger scale
+    const dispW = vw * scale, dispH = vh * scale;
+    const offX = (cw - dispW) / 2, offY = (ch - dispH) / 2;
+    return [ nx * dispW + offX, ny * dispH + offY ];
+  }
+
+  // ==========================================================================
+  //  PART 4 — MediaPipe Hands: handle each tracking result.
+  // ==========================================================================
+  function onHandResults(results) {
+    // Clear last frame's skeleton.
+    lmCtx.clearRect(0, 0, lmCanvas.width, lmCanvas.height);
+
+    const list = results.multiHandLandmarks;
+    if (!list || list.length === 0) {
+      hand.present = false;
+      grabbing = false;            // no hand = nothing grabbed
+      prevGrabbing = false;        // reset so the next pinch counts as new
+      return;
+    }
+
+    // We only track one hand (the first one MediaPipe reports).
+    const lm = list[0];
+
+    // ---- Draw the skeleton: lines between connected dots, then the dots. ----
+    lmCtx.lineWidth = 3;
+    lmCtx.strokeStyle = 'rgba(120, 230, 255, 0.9)';
+    for (const [a, b] of HAND_CONNECTIONS) {
+      const [ax, ay] = coverMap(lm[a].x, lm[a].y);
+      const [bx, by] = coverMap(lm[b].x, lm[b].y);
+      lmCtx.beginPath();
+      lmCtx.moveTo(ax, ay);
+      lmCtx.lineTo(bx, by);
+      lmCtx.stroke();
+    }
+    lmCtx.fillStyle = '#ffffff';
+    for (const p of lm) {
+      const [px, py] = coverMap(p.x, p.y);
+      lmCtx.beginPath();
+      lmCtx.arc(px, py, 4, 0, Math.PI * 2);
+      lmCtx.fill();
+    }
+
+    // ---- Measure the pinch: distance between thumb tip (4) and index tip (8).
+    // We measure in real screen pixels, then divide by the screen's short side
+    // so the number means the same thing on any screen size.
+    const thumb = lm[4], index = lm[8];
+    const [tx, ty] = coverMap(thumb.x, thumb.y);
+    const [ix, iy] = coverMap(index.x, index.y);
+    const distPx = Math.hypot(tx - ix, ty - iy);
+    const pinch = distPx / Math.min(window.innerWidth, window.innerHeight);
+
+    // The point between the two finger tips = where we "hold" the cube.
+    const midX = (thumb.x + index.x) / 2;
+    const midY = (thumb.y + index.y) / 2;
+
+    hand.present = true;
+    hand.x = midX;
+    hand.y = midY;
+    hand.pinch = pinch;
+
+    // Hysteresis: start grabbing on a tight pinch, release only when opened wide.
+    if (!grabbing && pinch < PINCH_ON)  grabbing = true;
+    if ( grabbing && pinch > PINCH_OFF) grabbing = false;
+
+    // A "pinch tap" = the moment the pinch FIRST closes (was open, now closed).
+    // In Scan mode we use that single event to start/stop photo capture.
+    const pinchStarted = grabbing && !prevGrabbing;
+    prevGrabbing = grabbing;
+    if (pinchStarted && mode === 'scan') toggleCapture();
+  }
+
+  // ==========================================================================
+  //  PART 5 — The 3D render loop (runs ~60 times a second).
+  // ==========================================================================
+  let lastTime = performance.now();
+  let fpsSmooth = 0;
+
+  function renderLoop() {
+    requestAnimationFrame(renderLoop);
+
+    // ---- FPS calculation (smoothed so the number doesn't jump around) ----
+    const now = performance.now();
+    const dt = now - lastTime;
+    lastTime = now;
+    if (dt > 0) {
+      const inst = 1000 / dt;
+      fpsSmooth = fpsSmooth ? fpsSmooth * 0.9 + inst * 0.1 : inst;
+    }
+
+    // ---- SCAN mode upkeep: keep the live "steadiness" meter fresh. ----
+    // We only check ~8x a second (throttled) so it stays cheap on phones.
+    if (mode === 'scan' && (now - lastSharpCheck >= 120)) {
+      lastSharpCheck = now;
+      updateSharpness();
+    }
+
+    // ---- SCAN mode: snap a photo every CAPTURE_EVERY_MS while capturing. ----
+    // This runs on a timer, NOT on your hand — so you can move the phone around
+    // the object with your hand out of the picture and it keeps taking photos.
+    if (capturing && (now - lastCaptureTime >= CAPTURE_EVERY_MS)) {
+      const saved = captureFrame();              // returns false if too blurry
+      if (saved) {
+        lastCaptureTime = now;                   // wait a full interval after a good shot
+      } else {
+        // Blurry: don't reset the full timer — retry soon so we grab a sharp moment.
+        lastCaptureTime = now - (CAPTURE_EVERY_MS - 150);
+      }
+    }
+
+    // In Scan mode the cube is hidden, so skip the cube logic entirely.
+    if (mode !== 'place') {
+      renderer.render(scene, cam3d);
+      fpsValEl.textContent = Math.round(fpsSmooth);
+      return;
+    }
+
+    if (hand.present && grabbing) {
+      // ----- GRABBING: move the cube to the hand, and size it by the pinch. -----
+      // Turn the hand's screen position into a 3D point on the plane z=0.
+      const [px, py] = coverMap(hand.x, hand.y);
+      const ndcX = (px / window.innerWidth)  * 2 - 1;   // -1..1 left/right
+      const ndcY = -(py / window.innerHeight) * 2 + 1;  // -1..1 bottom/top
+
+      const v = new THREE.Vector3(ndcX, ndcY, 0.5).unproject(cam3d);
+      const dir = v.sub(cam3d.position).normalize();
+      const dist = -cam3d.position.z / dir.z;           // reach the z=0 plane
+      const target = cam3d.position.clone().add(dir.multiplyScalar(dist));
+
+      // Smoothly slide toward the target (lerp) so movement looks natural.
+      cube.position.lerp(target, 0.4);
+
+      // Map the pinch gap (~0.02 tight .. ~0.25 wide) to a cube size (0.4..2.5).
+      const s = THREE.MathUtils.clamp(
+        THREE.MathUtils.mapLinear(hand.pinch, 0.02, 0.25, 0.4, 2.5),
+        0.4, 2.5
+      );
+      const cur = cube.scale.x;
+      cube.scale.setScalar(cur + (s - cur) * 0.3);      // smooth resize
+
+      // Make the grabbed cube glow a warm color so you know it's held.
+      cube.material.color.setHex(0xffcc33);
+    } else {
+      // ----- NOT GRABBING: gently spin on its own. -----
+      cube.rotation.x += 0.005;
+      cube.rotation.y += 0.008;
+      cube.material.color.setHex(0x33aaff);
+    }
+
+    renderer.render(scene, cam3d);
+    fpsValEl.textContent = Math.round(fpsSmooth);
+  }
+
+  // ==========================================================================
+  //  PART 6 — Turn the camera ON and start tracking.
+  // ==========================================================================
+  async function startCamera() {
+    // Ask the browser for the chosen camera. facingMode is a "preference".
+    const constraints = {
+      audio: false,
+      video: {
+        facingMode: { ideal: facingMode },
+        width:  { ideal: 1280 },
+        height: { ideal: 720 }
+      }
+    };
+    mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+    videoEl.srcObject = mediaStream;
+    await videoEl.play();
+
+    // Size everything once the video knows its real dimensions.
+    resizeAll();
+    if (videoEl.readyState < 2) {
+      await new Promise(res => videoEl.addEventListener('loadeddata', res, { once: true }));
+    }
+    resizeAll();
+  }
+
+  // Build the MediaPipe Hands tracker once.
+  function buildHands() {
+    hands = new Hands({
+      // Tells MediaPipe where to download its model files from.
+      locateFile: (file) =>
+        `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`
+    });
+    hands.setOptions({
+      maxNumHands: 1,             // track a single hand
+      modelComplexity: 1,         // 1 = good accuracy
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.6
+    });
+    hands.onResults(onHandResults);
+  }
+
+  // The MediaPipe "Camera" helper grabs each video frame and feeds it to Hands.
+  function startTrackingLoop() {
+    camera = new Camera(videoEl, {
+      onFrame: async () => { await hands.send({ image: videoEl }); },
+      width: 1280,
+      height: 720
+    });
+    camera.start();
+  }
+
+  // Stop everything cleanly (used before flipping cameras).
+  function stopCamera() {
+    try { if (camera && camera.stop) camera.stop(); } catch (e) {}
+    camera = null;
+    if (mediaStream) {
+      mediaStream.getTracks().forEach(t => t.stop()); // release the camera
+      mediaStream = null;
+    }
+  }
+
+  // ==========================================================================
+  //  PART 7 — Button handlers + first start.
+  // ==========================================================================
+  // The big "Start Camera" button. Phones require this tap before the camera
+  // (and before MediaPipe can run) — so all setup happens here.
+  startBtn.addEventListener('click', async () => {
+    startBtn.disabled = true;
+    statusEl.classList.remove('err');
+    statusEl.textContent = 'Starting camera…';
+    try {
+      buildHands();
+      await startCamera();
+      startTrackingLoop();
+      renderLoop();                 // begin drawing the 3D cube
+      startScreen.style.display = 'none';  // hide the cover screen
+    } catch (err) {
+      // Most common cause: camera permission denied, or not on https/localhost.
+      console.error(err);
+      statusEl.classList.add('err');
+      statusEl.textContent =
+        '⚠ Could not start the camera: ' + (err && err.message ? err.message : err) +
+        '  — Make sure you allowed camera access and opened the page via ' +
+        'http://localhost or https (not as a file).';
+      startBtn.disabled = false;
+    }
+  });
+
+  // The "Flip Camera" button: switch front <-> rear and restart tracking.
+  flipBtn.addEventListener('click', async () => {
+    if (!mediaStream) return;       // not started yet
+    flipBtn.disabled = true;
+    stopCamera();
+    facingMode = (facingMode === 'user') ? 'environment' : 'user';
+    mirrored = (facingMode === 'user');
+    try {
+      await startCamera();
+      startTrackingLoop();
+    } catch (err) {
+      console.error(err);
+      // If the chosen camera isn't available, flip back.
+      facingMode = (facingMode === 'user') ? 'environment' : 'user';
+      mirrored = (facingMode === 'user');
+      await startCamera();
+      startTrackingLoop();
+    }
+    flipBtn.disabled = false;
+  });
+
+  // ==========================================================================
+  //  PART 8 — SCAN MODE: capture photos, show thumbnails, download a ZIP.
+  // ==========================================================================
+  // The help text shown for each mode (filled into the top-left box).
+  const PLACE_HELP = `
+    <div><b>Place mode</b> — play with the 3D cube</div>
+    <div><b>Pinch</b> thumb + index to grab the cube</div>
+    <div>Move your hand to <b>drag</b> it around</div>
+    <div>Open/close the pinch to <b>resize</b> it</div>
+    <div>Let go and it <b>spins</b> on its own</div>`;
+
+  const SCAN_HELP = `
+    <div><b>Scan mode</b> — capture photos of a real object</div>
+    <div><b>Pinch</b> once to <b>start</b>, again to <b>stop</b></div>
+    <div>Walk <b>around</b> the object to fill the ring</div>
+    <div>Green = covered · blue = where you aim</div>
+    <div>Hold steady — blurry shots are skipped</div>`;
+
+  // A short note we drop inside the ZIP so "future you" knows what to do with it.
+  const READ_ME_TEXT =
+`These photos were captured with hand-3d.html (Scan mode).
+
+A normal web browser cannot build a real 3D model by itself. To turn these
+photos into an actual photoreal 3D model, upload this folder of images to one
+of these tools:
+
+  • Luma AI      (free app / web)  — easiest, great results from a phone.
+  • Polycam      (free tier)       — fast, very beginner-friendly.
+  • Nerfstudio   (free, advanced)  — runs on your own computer/GPU.
+
+Tips for a good result: keep the object still, move slowly all the way around
+it, keep it well-lit, and try to get high, low, and side angles.`;
+
+  // Draw the current camera frame onto a hidden canvas and save it as a JPEG.
+  // Returns true if a photo was saved, false if it was skipped (too blurry).
+  function captureFrame() {
+    if (frames.length >= MAX_FRAMES) { capturing = false; updateScanUI(); return true; }
+    const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
+    if (!vw || !vh) return false;                 // video not ready yet
+
+    // BLUR GATE: take a fresh sharpness reading and bail out if it's too shaky.
+    updateSharpness();
+    if (currentSharp < sharpThreshold) {
+      flashBlur();                                // show "skipped: blurry"
+      return false;                               // loop will retry very soon
+    }
+
+    // Shrink very large frames so the ZIP doesn't get huge (longest side 1280).
+    const maxSide = 1280;
+    let w = vw, h = vh;
+    if (Math.max(w, h) > maxSide) {
+      const k = maxSide / Math.max(w, h);
+      w = Math.round(w * k); h = Math.round(h * k);
+    }
+    snapCanvas.width = w; snapCanvas.height = h;
+    snapCtx.drawImage(videoEl, 0, 0, w, h);
+
+    // toBlob turns the picture into a real image file (JPEG, 85% quality).
+    snapCanvas.toBlob((blob) => {
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);      // a temporary link for preview
+      frames.push({ blob, url });
+      addThumb(url);
+      markCoverage();                             // light up the angle we just shot
+      if (frames.length >= MAX_FRAMES) capturing = false;
+      maybeAutoComplete();                         // finish on full, sharp coverage
+      updateScanUI();
+    }, 'image/jpeg', 0.85);
+    return true;
+  }
+
+  // Auto-stop: once the whole ring is green AND we have enough sharp photos,
+  // finish the scan by ourselves. (Manual pinch-to-stop still works any time.)
+  function maybeAutoComplete() {
+    if (!capturing) return;
+    if (coverage.every(Boolean) && frames.length >= MIN_SHARP_FRAMES) {
+      capturing = false;
+      scanComplete = true;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  //  BLUR DETECTION: estimate how sharp the live image is.
+  // ---------------------------------------------------------------------------
+  // We shrink the frame, turn it gray, then run a "Laplacian" edge detector.
+  // A sharp photo has lots of crisp edges (high variance); a blurry one is
+  // smooth (low variance). We return that variance number as the score.
+  function measureSharpness() {
+    const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
+    if (!vw || !vh) return 0;
+    const w = 128, h = Math.max(1, Math.round(vh / vw * 128));
+    blurCanvas.width = w; blurCanvas.height = h;
+    blurCtx.drawImage(videoEl, 0, 0, w, h);
+    let data;
+    try { data = blurCtx.getImageData(0, 0, w, h).data; }
+    catch (e) { return 0; }
+
+    const n = w * h;
+    const g = new Float32Array(n);                // grayscale brightness 0..255
+    for (let i = 0, p = 0; p < n; i += 4, p++) {
+      g[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    }
+    // Laplacian at each inner pixel, then its variance (spread).
+    let sum = 0, sum2 = 0, m = 0;
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const idx = y * w + x;
+        const lap = 4 * g[idx] - g[idx - 1] - g[idx + 1] - g[idx - w] - g[idx + w];
+        sum += lap; sum2 += lap * lap; m++;
+      }
+    }
+    if (m === 0) return 0;
+    const mean = sum / m;
+    return sum2 / m - mean * mean;                // variance = sharpness score
+  }
+
+  // Refresh the sharpness score, the adaptive threshold, and the meter bar.
+  function updateSharpness() {
+    currentSharp = measureSharpness();
+    // recentPeak slowly "forgets" old highs so the meter adapts to each scene.
+    recentPeak = Math.max(recentPeak * 0.97, currentSharp);
+    // "sharp enough" = ~45% of the best we've seen, but never below a hard floor.
+    sharpThreshold = Math.max(SHARP_FLOOR, recentPeak * 0.45);
+
+    const pct = Math.max(0, Math.min(100, (currentSharp / (sharpThreshold * 1.6)) * 100));
+    sharpFill.style.width = pct + '%';
+    const ok = currentSharp >= sharpThreshold;
+    sharpFill.style.background = ok ? '#34d399' : '#f59e0b';
+    sharpLabel.textContent = ok ? 'Steady ✓' : 'Hold steadier…';
+  }
+
+  // Briefly show the "skipped: blurry" note.
+  function flashBlur() {
+    blurFlash.classList.add('show');
+    clearTimeout(blurFlashTimer);
+    blurFlashTimer = setTimeout(() => blurFlash.classList.remove('show'), 600);
+  }
+
+  // ---------------------------------------------------------------------------
+  //  COVERAGE RING: build it, update it, and track which way we're facing.
+  // ---------------------------------------------------------------------------
+  // Build the 12 ring segments once (each is a 30° slice of a donut shape).
+  function buildRing() {
+    const cx = 100, cy = 100, ri = 58, ro = 86, gap = 3;   // SVG units & degrees
+    const toXY = (r, deg) => {
+      const a = (deg - 90) * Math.PI / 180;                // -90° so 0° points up
+      return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+    };
+    for (let i = 0; i < SEGMENTS; i++) {
+      const start = i * 30 + gap / 2, end = (i + 1) * 30 - gap / 2;
+      const [x1, y1] = toXY(ro, start), [x2, y2] = toXY(ro, end);
+      const [x3, y3] = toXY(ri, end),   [x4, y4] = toXY(ri, start);
+      const d = `M ${x1} ${y1} A ${ro} ${ro} 0 0 1 ${x2} ${y2} `
+              + `L ${x3} ${y3} A ${ri} ${ri} 0 0 0 ${x4} ${y4} Z`;
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', d);
+      path.setAttribute('class', 'seg');
+      ringSvg.insertBefore(path, ringText);                // keep number on top
+      segEls.push(path);
+    }
+  }
+
+  // Re-colour the segments (covered = green, current heading = blue) + count.
+  function updateRing() {
+    let covered = 0;
+    for (let i = 0; i < SEGMENTS; i++) {
+      let cls = 'seg';
+      if (coverage[i]) { cls += ' filled'; covered++; }
+      if (capturing && headingAvailable && i === currentSeg) cls += ' current';
+      segEls[i].setAttribute('class', cls);
+    }
+    ringText.textContent = covered + '/' + SEGMENTS;
+    return covered;
+  }
+
+  // Mark the angle we're facing as "covered" (called when a photo is saved).
+  function markCoverage() {
+    let seg;
+    if (headingAvailable && currentSeg >= 0) {
+      seg = currentSeg;                          // real direction from the sensor
+    } else {
+      seg = coverage.findIndex(v => !v);         // fallback: fill next empty slot
+      if (seg < 0) seg = 0;
+    }
+    coverage[seg] = true;
+    updateRing();
+  }
+
+  // Wipe the ring back to empty (new scan session).
+  function resetCoverage() {
+    coverage.fill(false);
+    currentSeg = headingAvailable ? currentSeg : -1;
+    updateRing();
+  }
+
+  // Motion sensor: figure out which way the phone is pointing.
+  function onOrientation(e) {
+    // iOS gives a true compass heading; otherwise use the generic "alpha" angle.
+    let a = (typeof e.webkitCompassHeading === 'number') ? e.webkitCompassHeading : e.alpha;
+    if (a == null) return;
+    headingAvailable = true;
+    a = ((a % 360) + 360) % 360;
+    currentSeg = Math.floor(a / (360 / SEGMENTS)) % SEGMENTS;
+  }
+
+  // Ask for motion-sensor access (iOS needs a tap; we're inside the Mode tap).
+  async function enableOrientation() {
+    try {
+      if (typeof DeviceOrientationEvent !== 'undefined'
+          && typeof DeviceOrientationEvent.requestPermission === 'function') {
+        const res = await DeviceOrientationEvent.requestPermission();
+        if (res !== 'granted') { headingAvailable = false; return; }
+      }
+      window.addEventListener('deviceorientation', onOrientation, true);
+    } catch (e) {
+      headingAvailable = false;                  // blocked → fallback ring is used
+    }
+  }
+
+  // Add one small thumbnail to the strip and keep the newest one in view.
+  function addThumb(url) {
+    const img = document.createElement('img');
+    img.src = url;
+    thumbsEl.appendChild(img);
+    thumbsEl.scrollLeft = thumbsEl.scrollWidth;
+  }
+
+  // Start or stop capturing (called by a "pinch tap" while in Scan mode).
+  function toggleCapture() {
+    capturing = !capturing;
+    if (capturing) {
+      lastCaptureTime = 0;                         // take the first photo at once
+      scanComplete = false;                        // starting fresh
+    }
+    updateScanUI();
+  }
+
+  // Update the scan status line + enable/disable the Download & Clear buttons.
+  function updateScanUI() {
+    if (scanComplete) {
+      // Auto-stop happened: announce success and point to the upload step.
+      scanStatus.textContent = `Scan complete ✓ — ${frames.length} sharp photos captured`;
+      scanStatus.classList.remove('recording');
+      uploadNote.classList.add('show');
+      downloadBtn.classList.add('pulse');          // draw the eye to Download
+    } else if (capturing) {
+      scanStatus.textContent = `● Capturing… ${frames.length}/${MAX_FRAMES} — pinch again to stop`;
+      scanStatus.classList.add('recording');
+      uploadNote.classList.remove('show');
+      downloadBtn.classList.remove('pulse');
+    } else {
+      scanStatus.classList.remove('recording');
+      scanStatus.textContent = frames.length === 0
+        ? 'Pinch to start scanning'
+        : `${frames.length} photo${frames.length > 1 ? 's' : ''} captured — pinch to add more, or download`;
+      // When every segment is filled, note the good all-around coverage.
+      if (coverage.every(Boolean)) scanStatus.textContent += '  ·  Good coverage ✓';
+      uploadNote.classList.remove('show');
+      downloadBtn.classList.remove('pulse');
+    }
+    downloadBtn.disabled = frames.length === 0;
+    clearBtn.disabled    = frames.length === 0;
+  }
+
+  // Switch between Place mode and Scan mode.
+  function setMode(m) {
+    mode = m;
+    capturing = false;
+    scanComplete = false;
+    if (mode === 'scan') {
+      modeBtn.textContent = '📷 Mode: Scan';
+      modeBtn.classList.add('scanmode');
+      scanPanel.classList.add('show');
+      ringEl.classList.add('show');                // show the coverage ring
+      cube.visible = false;                        // hide cube; focus on real object
+      helpEl.innerHTML = SCAN_HELP;
+      resetCoverage();                             // fresh ring for a new session
+      enableOrientation();                         // ask for the motion sensor
+    } else {
+      modeBtn.textContent = '🧩 Mode: Place';
+      modeBtn.classList.remove('scanmode');
+      scanPanel.classList.remove('show');
+      ringEl.classList.remove('show');             // hide the ring
+      cube.visible = true;
+      helpEl.innerHTML = PLACE_HELP;
+    }
+    updateScanUI();
+  }
+
+  // The "Mode" button flips between the two modes.
+  modeBtn.addEventListener('click', () => setMode(mode === 'place' ? 'scan' : 'place'));
+
+  // The "Download photos (ZIP)" button: bundle every captured photo into one zip.
+  downloadBtn.addEventListener('click', async () => {
+    if (frames.length === 0) return;
+    const original = downloadBtn.textContent;
+    downloadBtn.disabled = true;
+    downloadBtn.textContent = 'Zipping…';
+    try {
+      const zip = new JSZip();
+      const folder = zip.folder('scan-frames');
+      frames.forEach((f, i) => {
+        // frame_001.jpg, frame_002.jpg, … so they stay in order.
+        const name = 'frame_' + String(i + 1).padStart(3, '0') + '.jpg';
+        folder.file(name, f.blob);
+      });
+      folder.file('README.txt', READ_ME_TEXT);    // what-to-do-next note
+
+      const content = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(content);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'hand3d-scan-' + Date.now() + '.zip';
+      document.body.appendChild(a);
+      a.click();                                   // triggers the browser download
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (e) {
+      console.error(e);
+      scanStatus.textContent = '⚠ Could not build the ZIP: ' + (e.message || e);
+    }
+    downloadBtn.textContent = original;
+    downloadBtn.disabled = false;
+  });
+
+  // The "Clear" button: throw away the captured photos and start fresh.
+  clearBtn.addEventListener('click', () => {
+    frames.forEach(f => URL.revokeObjectURL(f.url));  // free the memory
+    frames.length = 0;
+    thumbsEl.innerHTML = '';
+    capturing = false;
+    scanComplete = false;
+    resetCoverage();                                  // empty the ring too
+    updateScanUI();
+  });
+
+  // Build the ring segments once, then start in Place mode.
+  buildRing();
+  // Start in Place mode (also fills in the help text for the first time).
+  setMode('place');
+
+  // Make sure sizes are correct even before the camera starts.
+  resizeAll();
+  </script>
+</body>
+</html>
