@@ -122,6 +122,8 @@
       max-width: 70vw;
       font-size: clamp(11px, 2.6vw, 15px);
       line-height: 1.4;
+      transition: opacity 0.5s ease;
+      cursor: pointer;
     }
     #help b { color: #6cf; }
     #fps {
@@ -250,11 +252,17 @@
       display: flex;
       gap: 8px;
       overflow-x: auto;
+      overflow-y: hidden;
       padding-left: 12px; padding-right: 12px; padding-bottom: 8px;
       -webkit-overflow-scrolling: touch;
+      touch-action: pan-x;
+      scroll-behavior: smooth;
+      -ms-overflow-style: none;
+      scrollbar-width: none;
       pointer-events: none;          /* buttons below handle their own clicks */
       z-index: 10;
     }
+    #modelMenu::-webkit-scrollbar { display: none; }
     #modelMenu.show { pointer-events: auto; }
     button.modelBtn {
       flex: 0 0 auto;
@@ -886,7 +894,8 @@
     camera = new Camera(videoEl, {
       onFrame: async () => { await hands.send({ image: videoEl }); },
       width: 1280,
-      height: 720
+      height: 720,
+      facingMode: facingMode   // pass current facing mode so MediaPipe requests the right camera
     });
     camera.start();
   }
@@ -899,6 +908,7 @@
       mediaStream.getTracks().forEach(t => t.stop()); // release the camera
       mediaStream = null;
     }
+    videoEl.srcObject = null;   // release so the next getUserMedia call gets a fresh stream
   }
 
   // ==========================================================================
@@ -966,6 +976,16 @@
     <div>Walk <b>around</b> the object to fill the ring</div>
     <div>Green = covered · blue = where you aim</div>
     <div>Hold steady — blurry shots are skipped</div>`;
+
+  // Auto-hide help after 5 s; tap to bring it back.
+  let _helpTimer = null;
+  function showHelp(html) {
+    if (html !== undefined) helpEl.innerHTML = html;
+    helpEl.style.opacity = '1';
+    clearTimeout(_helpTimer);
+    _helpTimer = setTimeout(() => { helpEl.style.opacity = '0'; }, 5000);
+  }
+  helpEl.addEventListener('click', () => showHelp());
 
   // A short note we drop inside the ZIP so "future you" knows what to do with it.
   const READ_ME_TEXT =
@@ -1226,7 +1246,7 @@ it, keep it well-lit, and try to get high, low, and side angles.`;
       modelGroup.visible = false;                  // hide model; focus on real object
       modelMenuEl.classList.remove('show');        // hide model menu in scan mode
       dragLayer.classList.remove('active');
-      helpEl.innerHTML = SCAN_HELP;
+      showHelp(SCAN_HELP);
       resetCoverage();                             // fresh ring for a new session
       enableOrientation();                         // ask for the motion sensor
     } else {
@@ -1237,7 +1257,7 @@ it, keep it well-lit, and try to get high, low, and side angles.`;
       modelGroup.visible = true;
       modelMenuEl.classList.add('show');           // show model menu in place mode
       dragLayer.classList.add('active');
-      helpEl.innerHTML = PLACE_HELP;
+      showHelp(PLACE_HELP);
     }
     updateScanUI();
   }
@@ -1315,27 +1335,24 @@ it, keep it well-lit, and try to get high, low, and side angles.`;
     },
     {
       id: 'heart',
-      label: '❤️ Heart',
-      // ============================================================
-      // PASTE YOUR HEART .GLB URL HERE (between the quotes):
-      url: '',
-      // ============================================================
+      label: '❤️ Heart (demo)',
+      // Placeholder: small animated bird model (97 KB) from Three.js r128 examples.
+      // Replace with a real heart .glb from Sketchfab/Z-Anatomy, or use 📁 Upload model.
+      url: 'https://raw.githubusercontent.com/mrdoob/three.js/r128/examples/models/gltf/Parrot.glb',
     },
     {
       id: 'skull',
-      label: '💀 Skull',
-      // ============================================================
-      // PASTE YOUR SKULL .GLB URL HERE:
-      url: '',
-      // ============================================================
+      label: '💀 Skull (demo)',
+      // Placeholder: CesiumMan humanoid character (490 KB) from Khronos glTF samples.
+      // Replace with a real skull .glb from Sketchfab/NIH 3D, or use 📁 Upload model.
+      url: 'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/main/2.0/CesiumMan/glTF-Binary/CesiumMan.glb',
     },
     {
       id: 'brain',
-      label: '🧠 Brain',
-      // ============================================================
-      // PASTE YOUR BRAIN .GLB URL HERE:
-      url: '',
-      // ============================================================
+      label: '🧠 BrainStem (demo)',
+      // Placeholder: BrainStem robotic-arm animation (3.1 MB) from Khronos glTF samples.
+      // Replace with a real brain .glb from Z-Anatomy/Sketchfab, or use 📁 Upload model.
+      url: 'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/main/2.0/BrainStem/glTF-Binary/BrainStem.glb',
     },
   ];
 
