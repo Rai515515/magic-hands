@@ -14,6 +14,21 @@
        it BIGGER or SMALLER. Let go and it spins by itself again.
     5. Shows on-screen help text and the current FPS (frames per second).
 
+  IT HAS TWO MODES (switch with the on-screen "Mode" button):
+    • PLACE mode = everything above (pinch-to-grab the 3D cube).
+    • SCAN mode  = point at a real object, pinch ONCE to start capturing photos
+      of it as you slowly move around it (one photo every ~0.5s, up to 30), see
+      them appear in a thumbnail strip, pinch again to stop, then download them
+      all as a ZIP file.
+
+  HONEST NOTE ABOUT "SCANNING":
+    A plain web browser CANNOT build a real photoreal 3D model live (true
+    photogrammetry / Gaussian-splatting / NeRF needs heavy GPU number-crunching
+    that doesn't run in a normal browser tab). So this does the genuinely useful
+    realistic thing: it captures a clean set of photos for you and packages them
+    into a ZIP. You then feed that ZIP into a real reconstruction tool (Luma AI,
+    Polycam, or Nerfstudio) to get an actual 3D model. See the chat briefing.
+
   IT WORKS ON BOTH A LAPTOP AND A PHONE and adapts automatically:
     - On a phone it starts with the REAR camera; on a laptop it uses the webcam.
     - A "Flip Camera" button switches between front/rear (or your cameras).
@@ -139,6 +154,71 @@
       -webkit-tap-highlight-color: transparent;
     }
     button.action:active { transform: scale(0.96); }
+    /* The Mode button glows a different color so the current mode is obvious. */
+    button.action.scanmode { background: rgba(120, 40, 120, 0.75); }
+
+    /* ---- Scan panel: the thumbnail strip + scan buttons (only shown in Scan mode) ---- */
+    #scanPanel {
+      position: fixed;
+      left: 0; right: 0;
+      /* Sits just above the bottom button row. */
+      bottom: calc(72px + env(safe-area-inset-bottom));
+      display: none;               /* hidden until you enter Scan mode */
+      flex-direction: column;
+      gap: 8px;
+      padding: 10px 12px;
+      z-index: 9;
+    }
+    #scanPanel.show { display: flex; }
+
+    /* The line that says "Pinch to start" / "Capturing 12/30" etc. */
+    #scanStatus {
+      align-self: center;
+      background: rgba(0,0,0,0.55);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      border-radius: 12px;
+      padding: 8px 14px;
+      font-size: clamp(12px, 3vw, 16px);
+      font-weight: 600;
+    }
+    #scanStatus.recording { background: rgba(200, 40, 40, 0.75); }
+
+    /* The horizontal strip of captured photo thumbnails. */
+    #thumbs {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;            /* scroll sideways if there are many */
+      padding: 6px;
+      background: rgba(0,0,0,0.4);
+      border-radius: 12px;
+      min-height: 0;
+      -webkit-overflow-scrolling: touch;
+    }
+    #thumbs:empty { display: none; }
+    #thumbs img {
+      height: clamp(44px, 12vw, 70px);
+      border-radius: 6px;
+      border: 1px solid rgba(255,255,255,0.25);
+      flex: 0 0 auto;
+    }
+
+    /* The two scan buttons (Download / Clear). Smaller than the main buttons. */
+    #scanBtns { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+    button.small {
+      pointer-events: auto;
+      border: none;
+      border-radius: 999px;
+      padding: 10px 18px;
+      font-size: clamp(12px, 3vw, 15px);
+      font-weight: 600;
+      color: #fff;
+      background: rgba(30,30,40,0.8);
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    button.small:disabled { opacity: 0.4; cursor: default; }
+    button.small.primary { background: linear-gradient(135deg, #34d399, #10b981); color: #04140d; }
 
     /* ---- The big "Start" screen shown before the camera turns on. ----
          (Phones REQUIRE a tap before the camera/audio can start.) */
@@ -188,19 +268,27 @@
     <canvas id="three"></canvas>
   </div>
 
-  <!-- Help text (left) and FPS counter (right) -->
+  <!-- Help text (left) and FPS counter (right). #help is filled in by JS so it
+       shows the right instructions for whichever mode you're in. -->
   <div id="hud">
-    <div id="help">
-      <div><b>Pinch</b> thumb + index to grab the cube</div>
-      <div>Move your hand to <b>drag</b> it around</div>
-      <div>Open/close the pinch to <b>resize</b> it</div>
-      <div>Let go and it <b>spins</b> on its own</div>
-    </div>
+    <div id="help"></div>
     <div id="fps">FPS: <b id="fpsVal">--</b></div>
   </div>
 
-  <!-- Buttons -->
+  <!-- Scan panel: status line + captured-photo thumbnails + download/clear.
+       Only visible while you're in Scan mode. -->
+  <div id="scanPanel">
+    <div id="scanStatus">Pinch to start scanning</div>
+    <div id="thumbs"></div>
+    <div id="scanBtns">
+      <button id="downloadBtn" class="small primary" disabled>⬇ Download photos (ZIP)</button>
+      <button id="clearBtn" class="small" disabled>🗑 Clear</button>
+    </div>
+  </div>
+
+  <!-- Bottom buttons -->
   <div id="controls">
+    <button id="modeBtn" class="action">🧩 Mode: Place</button>
     <button id="flipBtn" class="action">🔄 Flip Camera</button>
   </div>
 
@@ -222,6 +310,8 @@
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
   <!-- MediaPipe Camera utility: feeds camera frames into the hand tracker. -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
+  <!-- JSZip: bundles the captured photos into a single downloadable .zip file. -->
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
   <script>
   // ==========================================================================
@@ -237,6 +327,13 @@
   const startBtn    = document.getElementById('startBtn');
   const startScreen = document.getElementById('startScreen');
   const statusEl    = document.getElementById('status');
+  const helpEl      = document.getElementById('help');       // mode instructions
+  const modeBtn     = document.getElementById('modeBtn');     // Place <-> Scan
+  const scanPanel   = document.getElementById('scanPanel');   // strip + buttons
+  const scanStatus  = document.getElementById('scanStatus');  // "Capturing 5/30"
+  const thumbsEl    = document.getElementById('thumbs');      // photo thumbnails
+  const downloadBtn = document.getElementById('downloadBtn');
+  const clearBtn    = document.getElementById('clearBtn');
 
   // Is this likely a phone/tablet? If so we default to the REAR camera.
   const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
@@ -259,8 +356,21 @@
   // "grabbing" uses hysteresis: it turns ON at a tight pinch and only turns OFF
   // when you open your fingers wider — so the grab doesn't flicker.
   let grabbing = false;
+  let prevGrabbing = false;   // last frame's value, so we can spot a NEW pinch
   const PINCH_ON  = 0.06;  // pinch tighter than this = start grabbing
   const PINCH_OFF = 0.13;  // open wider than this    = let go
+
+  // ---- MODE + SCAN state ----
+  // mode is either 'place' (grab the cube) or 'scan' (capture photos).
+  let mode = 'place';
+  let capturing = false;            // are we actively snapping photos right now?
+  let lastCaptureTime = 0;          // when we last took a photo (for the timer)
+  const CAPTURE_EVERY_MS = 500;     // take one photo every 0.5 seconds
+  const MAX_FRAMES = 30;            // stop automatically after 30 photos
+  const frames = [];                // the captured photos, as { blob, url }
+  // A hidden canvas we draw the video onto in order to save each photo.
+  const snapCanvas = document.createElement('canvas');
+  const snapCtx = snapCanvas.getContext('2d');
 
   // The 21 standard hand landmark connections (which dots to join with lines).
   const HAND_CONNECTIONS = [
@@ -366,6 +476,7 @@
     if (!list || list.length === 0) {
       hand.present = false;
       grabbing = false;            // no hand = nothing grabbed
+      prevGrabbing = false;        // reset so the next pinch counts as new
       return;
     }
 
@@ -412,6 +523,12 @@
     // Hysteresis: start grabbing on a tight pinch, release only when opened wide.
     if (!grabbing && pinch < PINCH_ON)  grabbing = true;
     if ( grabbing && pinch > PINCH_OFF) grabbing = false;
+
+    // A "pinch tap" = the moment the pinch FIRST closes (was open, now closed).
+    // In Scan mode we use that single event to start/stop photo capture.
+    const pinchStarted = grabbing && !prevGrabbing;
+    prevGrabbing = grabbing;
+    if (pinchStarted && mode === 'scan') toggleCapture();
   }
 
   // ==========================================================================
@@ -430,6 +547,21 @@
     if (dt > 0) {
       const inst = 1000 / dt;
       fpsSmooth = fpsSmooth ? fpsSmooth * 0.9 + inst * 0.1 : inst;
+    }
+
+    // ---- SCAN mode: snap a photo every CAPTURE_EVERY_MS while capturing. ----
+    // This runs on a timer, NOT on your hand — so you can move the phone around
+    // the object with your hand out of the picture and it keeps taking photos.
+    if (capturing && (now - lastCaptureTime >= CAPTURE_EVERY_MS)) {
+      lastCaptureTime = now;
+      captureFrame();
+    }
+
+    // In Scan mode the cube is hidden, so skip the cube logic entirely.
+    if (mode !== 'place') {
+      renderer.render(scene, cam3d);
+      fpsValEl.textContent = Math.round(fpsSmooth);
+      return;
     }
 
     if (hand.present && grabbing) {
@@ -576,6 +708,164 @@
     }
     flipBtn.disabled = false;
   });
+
+  // ==========================================================================
+  //  PART 8 — SCAN MODE: capture photos, show thumbnails, download a ZIP.
+  // ==========================================================================
+  // The help text shown for each mode (filled into the top-left box).
+  const PLACE_HELP = `
+    <div><b>Place mode</b> — play with the 3D cube</div>
+    <div><b>Pinch</b> thumb + index to grab the cube</div>
+    <div>Move your hand to <b>drag</b> it around</div>
+    <div>Open/close the pinch to <b>resize</b> it</div>
+    <div>Let go and it <b>spins</b> on its own</div>`;
+
+  const SCAN_HELP = `
+    <div><b>Scan mode</b> — capture photos of a real object</div>
+    <div>Point at an object on a table</div>
+    <div><b>Pinch</b> once to <b>start</b> capturing</div>
+    <div>Slowly move <b>around</b> the object</div>
+    <div><b>Pinch</b> again to <b>stop</b>, then download</div>`;
+
+  // A short note we drop inside the ZIP so "future you" knows what to do with it.
+  const READ_ME_TEXT =
+`These photos were captured with hand-3d.html (Scan mode).
+
+A normal web browser cannot build a real 3D model by itself. To turn these
+photos into an actual photoreal 3D model, upload this folder of images to one
+of these tools:
+
+  • Luma AI      (free app / web)  — easiest, great results from a phone.
+  • Polycam      (free tier)       — fast, very beginner-friendly.
+  • Nerfstudio   (free, advanced)  — runs on your own computer/GPU.
+
+Tips for a good result: keep the object still, move slowly all the way around
+it, keep it well-lit, and try to get high, low, and side angles.`;
+
+  // Draw the current camera frame onto a hidden canvas and save it as a JPEG.
+  function captureFrame() {
+    if (frames.length >= MAX_FRAMES) { capturing = false; updateScanUI(); return; }
+    const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
+    if (!vw || !vh) return;                       // video not ready yet
+
+    // Shrink very large frames so the ZIP doesn't get huge (longest side 1280).
+    const maxSide = 1280;
+    let w = vw, h = vh;
+    if (Math.max(w, h) > maxSide) {
+      const k = maxSide / Math.max(w, h);
+      w = Math.round(w * k); h = Math.round(h * k);
+    }
+    snapCanvas.width = w; snapCanvas.height = h;
+    snapCtx.drawImage(videoEl, 0, 0, w, h);
+
+    // toBlob turns the picture into a real image file (JPEG, 85% quality).
+    snapCanvas.toBlob((blob) => {
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);      // a temporary link for preview
+      frames.push({ blob, url });
+      addThumb(url);
+      if (frames.length >= MAX_FRAMES) capturing = false;
+      updateScanUI();
+    }, 'image/jpeg', 0.85);
+  }
+
+  // Add one small thumbnail to the strip and keep the newest one in view.
+  function addThumb(url) {
+    const img = document.createElement('img');
+    img.src = url;
+    thumbsEl.appendChild(img);
+    thumbsEl.scrollLeft = thumbsEl.scrollWidth;
+  }
+
+  // Start or stop capturing (called by a "pinch tap" while in Scan mode).
+  function toggleCapture() {
+    capturing = !capturing;
+    if (capturing) lastCaptureTime = 0;           // take the first photo at once
+    updateScanUI();
+  }
+
+  // Update the scan status line + enable/disable the Download & Clear buttons.
+  function updateScanUI() {
+    if (capturing) {
+      scanStatus.textContent = `● Capturing… ${frames.length}/${MAX_FRAMES} — pinch again to stop`;
+      scanStatus.classList.add('recording');
+    } else {
+      scanStatus.classList.remove('recording');
+      scanStatus.textContent = frames.length === 0
+        ? 'Pinch to start scanning'
+        : `${frames.length} photo${frames.length > 1 ? 's' : ''} captured — pinch to add more, or download`;
+    }
+    downloadBtn.disabled = frames.length === 0;
+    clearBtn.disabled    = frames.length === 0;
+  }
+
+  // Switch between Place mode and Scan mode.
+  function setMode(m) {
+    mode = m;
+    capturing = false;
+    if (mode === 'scan') {
+      modeBtn.textContent = '📷 Mode: Scan';
+      modeBtn.classList.add('scanmode');
+      scanPanel.classList.add('show');
+      cube.visible = false;                        // hide cube; focus on real object
+      helpEl.innerHTML = SCAN_HELP;
+    } else {
+      modeBtn.textContent = '🧩 Mode: Place';
+      modeBtn.classList.remove('scanmode');
+      scanPanel.classList.remove('show');
+      cube.visible = true;
+      helpEl.innerHTML = PLACE_HELP;
+    }
+    updateScanUI();
+  }
+
+  // The "Mode" button flips between the two modes.
+  modeBtn.addEventListener('click', () => setMode(mode === 'place' ? 'scan' : 'place'));
+
+  // The "Download photos (ZIP)" button: bundle every captured photo into one zip.
+  downloadBtn.addEventListener('click', async () => {
+    if (frames.length === 0) return;
+    const original = downloadBtn.textContent;
+    downloadBtn.disabled = true;
+    downloadBtn.textContent = 'Zipping…';
+    try {
+      const zip = new JSZip();
+      const folder = zip.folder('scan-frames');
+      frames.forEach((f, i) => {
+        // frame_001.jpg, frame_002.jpg, … so they stay in order.
+        const name = 'frame_' + String(i + 1).padStart(3, '0') + '.jpg';
+        folder.file(name, f.blob);
+      });
+      folder.file('README.txt', READ_ME_TEXT);    // what-to-do-next note
+
+      const content = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(content);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'hand3d-scan-' + Date.now() + '.zip';
+      document.body.appendChild(a);
+      a.click();                                   // triggers the browser download
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (e) {
+      console.error(e);
+      scanStatus.textContent = '⚠ Could not build the ZIP: ' + (e.message || e);
+    }
+    downloadBtn.textContent = original;
+    downloadBtn.disabled = false;
+  });
+
+  // The "Clear" button: throw away the captured photos and start fresh.
+  clearBtn.addEventListener('click', () => {
+    frames.forEach(f => URL.revokeObjectURL(f.url));  // free the memory
+    frames.length = 0;
+    thumbsEl.innerHTML = '';
+    capturing = false;
+    updateScanUI();
+  });
+
+  // Start in Place mode (also fills in the help text for the first time).
+  setMode('place');
 
   // Make sure sizes are correct even before the camera starts.
   resizeAll();
