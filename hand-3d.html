@@ -403,6 +403,20 @@
     }
     #startBtn:active { transform: scale(0.97); }
 
+    /* Secondary "no camera" button on the start screen. */
+    #viewBtn {
+      pointer-events: auto;
+      border: 1px solid rgba(255,255,255,0.25);
+      border-radius: 999px;
+      padding: 12px 24px;
+      font-size: clamp(13px, 3.4vw, 16px);
+      font-weight: 600;
+      color: rgba(255,255,255,0.85);
+      background: rgba(255,255,255,0.08);
+      cursor: pointer;
+    }
+    #viewBtn:active { transform: scale(0.97); }
+
     /* Small status / error line on the start screen. */
     #status { min-height: 1.2em; font-size: clamp(12px, 3vw, 15px); opacity: 0.9; }
     .err { color: #ff8080 !important; opacity: 1 !important; }
@@ -476,16 +490,20 @@
   <div id="controls">
     <button id="modeBtn" class="action">🧩 Mode: Place</button>
     <button id="flipBtn" class="action">🔄 Flip Camera</button>
+    <!-- Scale buttons: only visible in no-camera model-viewer mode -->
+    <button id="scaleDownBtn" class="action" style="display:none">－</button>
+    <button id="scaleUpBtn"   class="action" style="display:none">＋</button>
   </div>
 
   <!-- The tap-to-start cover screen -->
   <div id="startScreen">
-    <h1>✋ Hand-Controlled 3D Cube</h1>
+    <h1>✋ Magic Hands</h1>
     <p>
-      This uses your camera to track your hand and float a 3D cube in your room.
-      Tap the button below and <b>allow camera access</b> when your browser asks.
+      Explore 3D anatomy models with your hands — rotate, grab, and resize using
+      hand gestures, or just drag with your finger. Camera is optional.
     </p>
-    <button id="startBtn">▶ Start Camera</button>
+    <button id="startBtn">▶ Start Camera (full gesture mode)</button>
+    <button id="viewBtn">🔬 View 3D models (no camera)</button>
     <div id="status"></div>
   </div>
 
@@ -531,7 +549,13 @@
   const modelMenuEl = document.getElementById('modelMenu');   // model picker row
   const loadOverlay = document.getElementById('loadOverlay'); // "Loading…" cover
   const dragLayer   = document.getElementById('dragLayer');   // drag-to-rotate target
-  const fileInput   = document.getElementById('modelFileInput');
+  const fileInput      = document.getElementById('modelFileInput');
+  const viewBtn        = document.getElementById('viewBtn');
+  const scaleDownBtn   = document.getElementById('scaleDownBtn');
+  const scaleUpBtn     = document.getElementById('scaleUpBtn');
+
+  // No-camera mode: user chose "View 3D models" — Three.js runs but no getUserMedia.
+  let noCamera = false;
 
   // Is this likely a phone/tablet? If so we default to the REAR camera.
   const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
@@ -999,6 +1023,31 @@
     flipBtn.disabled = false;
   });
 
+  // "View 3D models (no camera)" — starts Three.js only, no getUserMedia.
+  viewBtn.addEventListener('click', () => {
+    noCamera = true;
+    mirrored = false;          // no camera feed to mirror
+    applyMirror();
+    renderer.setClearColor(0x0d0d1a, 1); // dark background (no transparent video behind)
+    renderLoop();
+    setMode('place');
+    showHelp(NOCAM_HELP);
+    startScreen.style.display = 'none';
+    // Hide camera-specific controls, show scale buttons instead.
+    flipBtn.style.display = 'none';
+    modeBtn.style.display = 'none';
+    scaleDownBtn.style.display = '';
+    scaleUpBtn.style.display = '';
+  });
+
+  // Scale buttons for no-camera mode (pinch gesture unavailable without camera).
+  scaleUpBtn.addEventListener('click', () => {
+    modelGroup.scale.setScalar(Math.min(modelGroup.scale.x * 1.25, 5));
+  });
+  scaleDownBtn.addEventListener('click', () => {
+    modelGroup.scale.setScalar(Math.max(modelGroup.scale.x / 1.25, 0.1));
+  });
+
   // ==========================================================================
   //  PART 8 — SCAN MODE: capture photos, show thumbnails, download a ZIP.
   // ==========================================================================
@@ -1008,6 +1057,12 @@
     <div><b>Pinch</b> thumb + index to grab &amp; move</div>
     <div>Open/close pinch to <b>resize</b></div>
     <div><b>Drag</b> screen to rotate model</div>
+    <div>Pick a model from the top menu</div>`;
+
+  const NOCAM_HELP = `
+    <div><b>3D Model Viewer</b> — no camera needed</div>
+    <div><b>Drag</b> anywhere to rotate the model</div>
+    <div>Use <b>＋ −</b> buttons to resize</div>
     <div>Pick a model from the top menu</div>`;
 
   const SCAN_HELP = `
