@@ -494,8 +494,7 @@
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
   <!-- MediaPipe Hands: Google's hand-tracking model. -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
-  <!-- MediaPipe Camera utility: feeds camera frames into the hand tracker. -->
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js" crossorigin="anonymous"></script>
+  <!-- camera_utils removed: we drive MediaPipe with our own requestAnimationFrame loop -->
   <!-- GLTFLoader: part of Three.js, lets us load .glb / .gltf 3D model files. -->
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
   <!-- JSZip: bundles the captured photos into a single downloadable .zip file. -->
@@ -545,8 +544,10 @@
 
   // Holds the live camera stream + MediaPipe objects (created on Start).
   let mediaStream = null;
-  let camera = null;
   let hands = null;
+  // RAF loop that drives MediaPipe manually (replaces camera_utils Camera helper).
+  let rafId = null;
+  let mpBusy = false;   // "busy" flag: never send a frame while one is in-flight
 
   // The latest hand info from MediaPipe, read by the 3D loop each frame.
   // present: is a hand visible?  x/y: hand position (0..1).  pinch: finger gap.
@@ -852,20 +853,52 @@
   //  PART 6 — Turn the camera ON and start tracking.
   // ==========================================================================
   async function startCamera() {
-    // Ask the browser for the chosen camera. facingMode is a "preference".
-    const constraints = {
-      audio: false,
-      video: {
-        facingMode: { ideal: facingMode },
-        width:  { ideal: 1280 },
-        height: { ideal: 720 }
+    const baseVideo = { width: { ideal: 1280 }, height: { ideal: 720 } };
+
+    if (facingMode === 'environment') {
+      // Tier 1: if permission was already granted, enumerateDevices() has real
+      // labels and we can pick the rear camera by deviceId — most reliable on
+      // multi-lens phones.
+      let usedDeviceId = false;
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const cams = devices.filter(d => d.kind === 'videoinput');
+        const rear = cams.find(d => /back|rear|environment/i.test(d.label));
+        if (rear && rear.deviceId) {
+          try {
+            mediaStream = await navigator.mediaDevices.getUserMedia({
+              audio: false,
+              video: { ...baseVideo, deviceId: { exact: rear.deviceId } }
+            });
+            usedDeviceId = true;
+          } catch (_) { /* fall through */ }
+        }
+      } catch (_) { /* enumerate not available */ }
+
+      if (!usedDeviceId) {
+        // Tier 2: facingMode:{exact:'environment'} (hard requirement)
+        try {
+          mediaStream = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: { ...baseVideo, facingMode: { exact: 'environment' } }
+          });
+        } catch (_) {
+          // Tier 3: facingMode:{ideal:'environment'} (soft preference, always works)
+          mediaStream = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: { ...baseVideo, facingMode: { ideal: 'environment' } }
+          });
+        }
       }
-    };
-    mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+    } else {
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { ...baseVideo, facingMode: 'user' }
+      });
+    }
+
     videoEl.srcObject = mediaStream;
     await videoEl.play();
-
-    // Size everything once the video knows its real dimensions.
     resizeAll();
     if (videoEl.readyState < 2) {
       await new Promise(res => videoEl.addEventListener('loadeddata', res, { once: true }));
@@ -889,26 +922,33 @@
     hands.onResults(onHandResults);
   }
 
-  // The MediaPipe "Camera" helper grabs each video frame and feeds it to Hands.
+  // Drive MediaPipe ourselves: one RAF loop, one frame in-flight at a time.
+  // This replaces the old camera_utils Camera helper which called getUserMedia
+  // a second time and overwrote our carefully-chosen stream.
   function startTrackingLoop() {
-    camera = new Camera(videoEl, {
-      onFrame: async () => { await hands.send({ image: videoEl }); },
-      width: 1280,
-      height: 720,
-      facingMode: facingMode   // pass current facing mode so MediaPipe requests the right camera
-    });
-    camera.start();
+    async function loop() {
+      rafId = requestAnimationFrame(loop);
+      // Skip if the previous send is still processing, or if the video isn't ready.
+      if (mpBusy || !hands || videoEl.readyState < 2 || !videoEl.videoWidth) return;
+      mpBusy = true;
+      try {
+        await hands.send({ image: videoEl });
+      } finally {
+        mpBusy = false;
+      }
+    }
+    loop();
   }
 
   // Stop everything cleanly (used before flipping cameras).
   function stopCamera() {
-    try { if (camera && camera.stop) camera.stop(); } catch (e) {}
-    camera = null;
+    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+    mpBusy = false;
     if (mediaStream) {
-      mediaStream.getTracks().forEach(t => t.stop()); // release the camera
+      mediaStream.getTracks().forEach(t => t.stop());
       mediaStream = null;
     }
-    videoEl.srcObject = null;   // release so the next getUserMedia call gets a fresh stream
+    videoEl.srcObject = null;
   }
 
   // ==========================================================================
